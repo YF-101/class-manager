@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+
+{% if error %}
+<p style="background:#fee2e2;color:#b91c1c;padding:12px;border-radius:8px;margin-bottom:16px;font-size:14px;">
+  ⚠️ {{ error }}
+</p>
+{% endif %}
+
+<div class="card">
+  <h2>👤 添加老师账号</h2>
+  <form action="/add_user" method="post" style="display:flex; gap:10px; flex-wrap:wrap;">
+    <input name="username" placeholder="新用户名" style="flex:1; min-width:140px;">
+    <input name="password" placeholder="初始密码（至少6位）" style="flex:1; min-width:160px;">
+    <button class="btn btn-green">添加账号</button>
+  </form>
+  <p style="margin-top:12px; font-size:13px; color:#6b7280;">
+    为其他老师开账号；账号建好后，他们登录可自行修改密码
+  </p>
+</div>
+
+<div class="card">
+  <h2>👥 全部账号</h2>
+  <table>
+    <thead>
+      <tr><th>账号ID</th><th>用户名</th><th>角色</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.id }}</td>
+        <td>{{ u.username }}</td>
+        <td>
+          {% if u.username == "admin" %}<span class="badge badge-fail">管理员</span>
+          {% else %}<span class="badge badge-ok">老师</span>{% endif %}
+        </td>
+        <td>
+          {% if u.username != "admin" %}
+          <form action="/delete_user/{{ u.id }}" method="post" style="display:inline;"
+                onsubmit="return confirm('确定删除账号 {{ u.username }}？');">
+            <button class="btn btn-delete">删除</button>
+          </form>
+          {% else %}
+          <span class="muted">不可删除</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p style="margin-top:14px; font-size:13px;"><a href="/">← 返回</a></p>
+</div>
+
+{% endblock %}

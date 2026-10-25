@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# 数据库（含学生成绩和密码，绝不传）
+class.db
+
+# 本地环境变量（含邮件密码、API Key，绝不传）
+.env
+.class_manager_env
+
+# 打包文件
+*.zip
+
+# 虚拟环境
+.venv/
+venv/
+reg.txt

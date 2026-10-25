@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <h2>➕ 添加学生</h2>
+  <form action="/add" method="post" style="display:flex; gap:10px;">
+    <input name="name" placeholder="输入学生姓名" style="flex:1;">
+    <button class="btn btn-green">添加学生</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>学生名单（{{ students|length }} 人）</h2>
+  {% if students %}
+  <ul class="student-list">
+    {% for s in students %}
+    <li>
+      <span class="name">{{ s.name }}</span>
+      <span class="links">
+        <a href="/score/{{ s.id }}">✏️ 录成绩</a>
+        <a href="/student/{{ s.id }}">📊 看成绩</a>
+        <form action="/delete/{{ s.id }}" method="post" style="display:inline;"
+              onsubmit="return confirm('确定删除 {{ s.name }} 吗？此操作不可恢复');">
+          <button class="btn btn-delete">🗑️ 删除</button>
+        </form>
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">还没有学生，先添加一个吧</p>
+  {% endif %}
+</div>
+
+{% endblock %}

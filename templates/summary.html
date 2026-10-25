@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <h2>📊 全班成绩汇总</h2>
+  <p style="margin-bottom:12px; font-size:14px;">
+    选择考试：
+    {% for e in all_exams %}
+      {% if exam and e.id == exam.id %}
+        <strong style="color:#3b82f6;">{{ e.name }}</strong>
+      {% else %}
+        <a href="/summary?exam_id={{ e.id }}">{{ e.name }}</a>
+      {% endif %}
+      {% if not loop.last %} ｜ {% endif %}
+    {% endfor %}
+  </p>
+  <p style="font-size:13px;"><a href="/">← 返回名单</a></p>
+</div>
+
+<div class="card">
+  <h2>🏆 「{{ exam.name }}」排名（按平均分）</h2>
+  {% if ranking %}
+  <table>
+    <thead>
+      <tr><th>名次</th><th>学生</th><th>总分</th><th>平均分</th><th>科目数</th><th>不及格科数</th></tr>
+    </thead>
+    <tbody>
+      {% for r in ranking %}
+      <tr>
+        <td>
+          {% if loop.index == 1 %}🥇
+          {% elif loop.index == 2 %}🥈
+          {% elif loop.index == 3 %}🥉
+          {% else %}{{ loop.index }}{% endif %}
+        </td>
+        <td><a href="/student/{{ r.sid }}">{{ r.name }}</a></td>
+        <td>{{ r.total | num }}</td>
+        <td class="{% if r.fail_count > 0 %}fail{% endif %}">{{ r.avg | num }}</td>
+        <td>{{ r.count }}</td>
+        <td>
+          {% if r.fail_count > 0 %}<span class="badge badge-fail">{{ r.fail_count }} 科</span>
+          {% else %}<span class="badge badge-ok">0</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">这场考试还没有成绩，先去录入</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>⚠️ 「{{ exam.name }}」不及格名单</h2>
+  {% if fails %}
+  <table>
+    <thead>
+      <tr><th>学生</th><th>科目</th><th>成绩</th><th>及格线</th></tr>
+    </thead>
+    <tbody>
+      {% for f in fails %}
+      <tr>
+        <td>{{ f.name }}</td>
+        <td>{{ f.subject }}</td>
+        <td class="fail">{{ f.score | num }}</td>
+        <td>{{ f.pass_score | num }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted" style="color:#16a34a;">🎉 这场考试没有不及格的，全员及格！</p>
+  {% endif %}
+</div>
+
+{% endblock %}

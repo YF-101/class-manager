@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <h2>📊 {{ stu.name }} 的成绩</h2>
+  <p style="margin-bottom:12px; font-size:13px;" class="no-print">
+    <a href="/score/{{ stu.id }}">✏️ 继续录成绩</a> ｜ <a href="/">← 返回名单</a>
+    <button onclick="window.print()" class="btn btn-blue"
+            style="padding:5px 12px; font-size:12px; margin-left:8px;">🖨️ 打印成绩单</button>
+  </p>
+
+  {% if chart %}
+  <div style="margin-bottom:18px;">
+    <canvas id="trend" height="100"></canvas>
+  </div>
+  {% endif %}
+
+  {% if rows %}
+  <table>
+    <thead>
+      <tr><th>考试</th><th>科目</th><th>分数</th><th>状态</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.exam_name }}</td>
+        <td>{{ r.subject }}</td>
+        <td class="{% if r.score < r.pass_score %}fail{% endif %}">{{ r.score | num }}</td>
+        <td>
+          {% if r.score < r.pass_score %}<span class="badge badge-fail">⚠️ 不及格</span>
+          {% else %}<span class="badge badge-ok">✅ 及格</span>{% endif %}
+        </td>
+        <td><a href="/edit_score/{{ r.id }}">✏️ 修改</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">还没有成绩</p>
+  {% endif %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{% if chart %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+const exams = {{ all_exams | tojson }};
+const chart = {{ chart | tojson }};
+const colors = ['#3b82f6','#16a34a','#dc2626','#7c3aed','#f59e0b','#06b6d4','#ec4899'];
+const datasets = Object.keys(chart).map((sub, i) => ({
+  label: sub,
+  data: exams.map(e => chart[sub][e.id] !== undefined ? chart[sub][e.id] : null),
+  borderColor: colors[i % colors.length],
+  backgroundColor: colors[i % colors.length],
+  tension: 0.3,
+  spanGaps: true,
+  pointRadius: 5
+}));
+new Chart(document.getElementById('trend'), {
+  type: 'line',
+  data: { labels: exams.map(e => e.name), datasets },
+  options: {
+    responsive: true,
+    scales: { y: { min: 0 } },
+    plugins: { legend: { position: 'top' } }
+  }
+});
+</script>
+{% endif %}
+{% endblock %}
