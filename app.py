@@ -723,35 +723,58 @@ def edit_score(score_id):
 @login_required
 def export_excel():
     conn = get_db()
-    rows = conn.execute(
-        "SELECT st.name, e.name exam_name, s.subject, s.score, es.pass_score "
-        "FROM scores s JOIN students st ON s.student_id=st.id "
-        "JOIN exams e ON s.exam_id=e.id "
-        "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
-        "ORDER BY st.name, e.id, s.subject").fetchall()
+    # 所有考试
+    exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    # 所有学生
+    students = conn.execute("SELECT id, name FROM students ORDER BY id").fetchall()
+    # 所有成绩：key=(student_id, exam_id, subject) -> (score, pass_score)
+    score_map = {}
+    for r in conn.execute(
+        "SELECT s.student_id, s.exam_id, s.subject, s.score, es.pass_score "
+        "FROM scores s LEFT JOIN exam_subjects es "
+        "ON es.exam_id=s.exam_id AND es.subject=s.subject"
+    ):
+        score_map[(r["student_id"], r["exam_id"], r["subject"])] = (r["score"], r["pass_score"])
     conn.close()
 
+    SUBJECTS = ["语文", "数学", "英语", "物理", "化学", "生物"]
+
     wb = Workbook()
-    ws = wb.active
-    ws.title = "全班成绩"
-    ws.append(["学生", "考试", "科目", "分数", "及格线", "状态"])
+    wb.remove(wb.active)  # 删除默认空表
+
     head_fill = PatternFill("solid", fgColor="1E3A8A")
-    red_fill = PatternFill("solid", fgColor="FEE2E2")
-    for c in ws[1]:
-        c.fill = head_fill
-        c.font = Font(color="FFFFFF", bold=True)
-        c.alignment = Alignment(horizontal="center")
+    red_fill = PatternFill("solid", fgColor="FECACA")
 
-    for r in rows:
-        is_pass = r["score"] >= r["pass_score"]
-        ws.append([r["name"], r["exam_name"], r["subject"], r["score"],
-                   r["pass_score"], "及格" if is_pass else "不及格"])
-        if not is_pass:
-            for c in ws[ws.max_row]:
-                c.fill = red_fill
+    for exam in exams:
+        ws = wb.create_sheet(title=exam["name"][:31])
+        # 表头
+        headers = ["姓名"] + SUBJECTS
+        ws.append(headers)
+        for c in ws[1]:
+            c.fill = head_fill
+            c.font = Font(color="FFFFFF", bold=True)
+            c.alignment = Alignment(horizontal="center")
+        # 每个学生一行
+        for stu in students:
+            row = [stu["name"]]
+            for subj in SUBJECTS:
+                info = score_map.get((stu["id"], exam["id"], subj))
+                row.append(info[0] if info else "")
+            ws.append(row)
+            # 不及格标红
+            for col_idx, subj in enumerate(SUBJECTS, start=2):
+                info = score_map.get((stu["id"], exam["id"], subj))
+                if info and info[1] is not None and info[0] < info[1]:
+                    ws.cell(row=ws.max_row, column=col_idx).fill = red_fill
+                    ws.cell(row=ws.max_row, column=col_idx).font = Font(color="DC2626", bold=True)
+        # 列宽
+        ws.column_dimensions["A"].width = 12
+        for i in range(2, 8):
+            ws.column_dimensions[chr(64 + i)].width = 8
 
-    for i, w in enumerate([12, 10, 10, 8, 8, 8], start=1):
-        ws.column_dimensions[chr(64 + i)].width = w
+    if not exams:
+        ws = wb.create_sheet(title="全班成绩")
+        ws.append(["暂无考试数据"])
 
     buf = io.BytesIO()
     wb.save(buf)
