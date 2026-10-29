@@ -22,6 +22,18 @@ from openpyxl.styles import Font, PatternFill, Alignment
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "student-grade-system-secret-2026")
+
+# 启动时读取 ~/.class_manager_env 配置文件（公网服务器上放 Mailjet/SMTP 密钥）
+_env_file = os.path.expanduser("~/.class_manager_env")
+if os.path.exists(_env_file):
+    with open(_env_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
 # 数据库用绝对路径（基于 app.py 所在目录），换任何运行目录都找得到
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE_DIR, "class.db")
