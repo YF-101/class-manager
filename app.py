@@ -468,6 +468,12 @@ def student_page(sid):
                            all_exams=all_exams, chart=chart)
 
 
+@app.route("/help")
+@login_required
+def help_page():
+    return render_template("help.html")
+
+
 # ===== 考试管理：自定义考试名称 + 每场考试的科目/满分/及格线 =====
 
 @app.route("/exams")
