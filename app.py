@@ -61,10 +61,31 @@ def get_db():
 
 
 def send_email(to_addr, subject, body):
-    """统一发信入口：配置了 Mailjet 就用 Mailjet（公网），否则用 SMTP（本地）"""
+    """统一发信入口：优先 Brevo → Mailjet → SMTP（公网用 HTTP API，本地用 SMTP）"""
+    if os.environ.get("BREVO_API_KEY"):
+        return send_email_via_brevo(to_addr, subject, body)
     if os.environ.get("MAILJET_KEY"):
         return send_email_via_mailjet(to_addr, subject, body)
     return send_email_via_smtp(to_addr, subject, body)
+
+
+def send_email_via_brevo(to_addr, subject, body):
+    """通过 Brevo HTTP API 发邮件（免费 300 封/天）"""
+    key = os.environ.get("BREVO_API_KEY")
+    sender = os.environ.get("BREVO_SENDER", "qq1039535644@gmail.com")
+    payload = {
+        "sender": {"email": sender, "name": "班主任成绩系统"},
+        "to": [{"email": to_addr}],
+        "subject": subject,
+        "textContent": body
+    }
+    req = urlreq.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "api-key": key})
+    with urlreq.urlopen(req) as resp:
+        return resp.status
 
 
 def send_email_via_mailjet(to_addr, subject, body):
