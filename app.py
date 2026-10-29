@@ -125,16 +125,34 @@ def admin_required(f):
     return wrapper
 
 
+def get_my_student(conn, sid):
+    """查一个学生，但只能查当前老师自己的（admin 不受限）。查不到返回 None。"""
+    uid = session.get("uid")
+    if session.get("user") == "admin":
+        return conn.execute("SELECT * FROM students WHERE id=?", (sid,)).fetchone()
+    return conn.execute("SELECT * FROM students WHERE id=? AND teacher_id=?",
+                        (sid, uid)).fetchone()
+
+
+def get_my_exam(conn, exam_id):
+    """查一场考试，但只能查当前老师自己的（admin 不受限）。"""
+    uid = session.get("uid")
+    if session.get("user") == "admin":
+        return conn.execute("SELECT * FROM exams WHERE id=?", (exam_id,)).fetchone()
+    return conn.execute("SELECT * FROM exams WHERE id=? AND teacher_id=?",
+                        (exam_id, uid)).fetchone()
+
+
 # 启动时建表（若没有）
 conn = get_db()
 conn.execute("CREATE TABLE IF NOT EXISTS students ("
-             "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)")
+             "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER)")
 conn.execute("CREATE TABLE IF NOT EXISTS scores ("
              "id INTEGER PRIMARY KEY AUTOINCREMENT, "
              "student_id INTEGER, exam_id INTEGER, subject TEXT, score REAL, "
              "FOREIGN KEY(student_id) REFERENCES students(id))")
 conn.execute("CREATE TABLE IF NOT EXISTS exams ("
-             "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL)")
+             "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER)")
 conn.execute("CREATE TABLE IF NOT EXISTS exam_subjects ("
              "id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, "
              "subject TEXT, max_score REAL, pass_score REAL, "
@@ -145,6 +163,17 @@ conn.execute("CREATE TABLE IF NOT EXISTS users ("
 conn.execute("CREATE TABLE IF NOT EXISTS reset_tokens ("
              "id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, "
              "token TEXT, expires_at REAL)")
+
+# 旧库迁移：给 students / exams 补 teacher_id 列（已存在的列会报错，忽略即可）
+for _tbl in ("students", "exams"):
+    try:
+        conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN teacher_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # 列已存在
+# 旧数据全部归到 admin（id=1）
+conn.execute("UPDATE students SET teacher_id=1 WHERE teacher_id IS NULL")
+conn.execute("UPDATE exams SET teacher_id=1 WHERE teacher_id IS NULL")
+
 # 第一次运行没有账号，创建一个默认管理员（密码哈希后存储）
 if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
     conn.execute("INSERT INTO users (username, password) VALUES (?,?)",
@@ -170,6 +199,7 @@ def login():
         conn.close()
         if u and check_password_hash(u["password"], password):
             session["user"] = username        # 登录成功，记录到 session
+            session["uid"] = u["id"]         # 记录用户 id，用于数据隔离
             return redirect("/")
         error = "用户名或密码错误"
     return render_template("login.html", error=error, info=info)
@@ -350,12 +380,17 @@ def delete_user(uid):
     return redirect("/users")
 
 
-# ----- 首页：学生列表 -----
+# ----- 首页：学生列表（只看自己班的） -----
 @app.route("/")
 @login_required
 def index():
     conn = get_db()
-    rows = conn.execute("SELECT * FROM students ORDER BY id").fetchall()
+    uid = session.get("uid")
+    if session.get("user") == "admin":
+        rows = conn.execute("SELECT * FROM students ORDER BY id").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM students WHERE teacher_id=? ORDER BY id",
+                            (uid,)).fetchall()
     conn.close()
     return render_template("index.html", students=rows)
 
@@ -367,11 +402,18 @@ def add_student():
     name = request.form.get("name", "").strip()
     if name:
         conn = get_db()
-        exists = conn.execute("SELECT id FROM students WHERE name=?", (name,)).fetchone()
-        if exists:                                # 已存在同名学生 → 拒绝
+        uid = session.get("uid")
+        # 重名检查只在自己班范围内
+        if session.get("user") == "admin":
+            exists = conn.execute("SELECT id FROM students WHERE name=?", (name,)).fetchone()
+        else:
+            exists = conn.execute("SELECT id FROM students WHERE name=? AND teacher_id=?",
+                                  (name, uid)).fetchone()
+        if exists:
             conn.close()
             return f'<script>alert("已存在同名学生：{name}"); location.href="/"</script>'
-        conn.execute("INSERT INTO students (name) VALUES (?)", (name,))
+        conn.execute("INSERT INTO students (name, teacher_id) VALUES (?,?)",
+                     (name, uid if session.get("user") != "admin" else 1))
         conn.commit()
         conn.close()
     return '<script>location.href="/"</script>'
@@ -382,11 +424,16 @@ def add_student():
 @login_required
 def score_page(sid):
     conn = get_db()
-    stu = conn.execute("SELECT * FROM students WHERE id=?", (sid,)).fetchone()
+    stu = get_my_student(conn, sid)
     if not stu:
-        return "没有这个学生"
+        conn.close()
+        return "没有这个学生（或不是你班的）"
 
-    all_exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    if session.get("user") == "admin":
+        all_exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    else:
+        all_exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
+                                 (session.get("uid"),)).fetchall()
     # 当前选中的考试（URL 或表单）
     exam_id = request.values.get("exam_id", type=int)
     if not exam_id and all_exams:
@@ -452,11 +499,17 @@ def score_page(sid):
 @login_required
 def student_page(sid):
     conn = get_db()
-    stu = conn.execute("SELECT * FROM students WHERE id=?", (sid,)).fetchone()
+    stu = get_my_student(conn, sid)
     if not stu:
-        return "没有这个学生"
+        conn.close()
+        return "没有这个学生（或不是你班的）"
     rows = get_student_scores(conn, sid)
-    all_exams = [dict(e) for e in conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()]
+    if session.get("user") == "admin":
+        all_exams = [dict(e) for e in conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()]
+    else:
+        all_exams = [dict(e) for e in conn.execute(
+            "SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
+            (session.get("uid"),)).fetchall()]
 
     # 折线图：科目 -> {考试id: 分数}
     chart = {}
@@ -480,7 +533,12 @@ def help_page():
 @login_required
 def exam_list():
     conn = get_db()
-    exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    uid = session.get("uid")
+    if session.get("user") == "admin":
+        exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    else:
+        exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
+                            (uid,)).fetchall()
     # 每场考试录了多少条成绩
     counts = {}
     for r in conn.execute("SELECT exam_id, COUNT(*) c FROM scores GROUP BY exam_id"):
@@ -495,13 +553,20 @@ def create_exam():
     name = request.form.get("name", "").strip()
     conn = get_db()
     error = None
+    uid = session.get("uid")
     if not name:
         error = "考试名称不能为空"
-    elif conn.execute("SELECT 1 FROM exams WHERE name=?", (name,)).fetchone():
-        error = f"已存在考试：{name}"
+    elif session.get("user") == "admin":
+        if conn.execute("SELECT 1 FROM exams WHERE name=?", (name,)).fetchone():
+            error = f"已存在考试：{name}"
     else:
-        exam_id = conn.execute("INSERT INTO exams (name) VALUES (?)",
-                               (name,)).lastrowid
+        if conn.execute("SELECT 1 FROM exams WHERE name=? AND teacher_id=?",
+                        (name, uid)).fetchone():
+            error = f"已存在考试：{name}"
+    if error is None:
+        exam_id = conn.execute("INSERT INTO exams (name, teacher_id) VALUES (?,?)",
+                               (name, uid if session.get("user") != "admin" else 1)
+                               ).lastrowid
         # 新考试自动按山东高考模板生成科目，省得手动一个个加
         for subj, mx, ps in default_subjects():
             conn.execute("INSERT INTO exam_subjects (exam_id,subject,max_score,pass_score) "
@@ -509,7 +574,11 @@ def create_exam():
         conn.commit()
         conn.close()
         return redirect(f"/exam/{exam_id}")
-    exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    if session.get("user") == "admin":
+        exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    else:
+        exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
+                            (uid,)).fetchall()
     counts = {}
     for r in conn.execute("SELECT exam_id, COUNT(*) c FROM scores GROUP BY exam_id"):
         counts[r["exam_id"]] = r["c"]
@@ -521,10 +590,11 @@ def create_exam():
 @login_required
 def delete_exam(exam_id):
     conn = get_db()
-    conn.execute("DELETE FROM exam_subjects WHERE exam_id=?", (exam_id,))
-    conn.execute("DELETE FROM scores WHERE exam_id=?", (exam_id,))
-    conn.execute("DELETE FROM exams WHERE id=?", (exam_id,))
-    conn.commit()
+    if get_my_exam(conn, exam_id):
+        conn.execute("DELETE FROM exam_subjects WHERE exam_id=?", (exam_id,))
+        conn.execute("DELETE FROM scores WHERE exam_id=?", (exam_id,))
+        conn.execute("DELETE FROM exams WHERE id=?", (exam_id,))
+        conn.commit()
     conn.close()
     return redirect("/exams")
 
@@ -533,9 +603,10 @@ def delete_exam(exam_id):
 @login_required
 def exam_config(exam_id):
     conn = get_db()
-    exam = conn.execute("SELECT * FROM exams WHERE id=?", (exam_id,)).fetchone()
+    exam = get_my_exam(conn, exam_id)
     if not exam:
-        return "没有这场考试"
+        conn.close()
+        return "没有这场考试（或不是你的）"
     subs = conn.execute("SELECT * FROM exam_subjects WHERE exam_id=? ORDER BY id",
                         (exam_id,)).fetchall()
     conn.close()
@@ -549,6 +620,10 @@ def add_subject(exam_id):
     max_s = request.form.get("max_score", "").strip()
     pass_s = request.form.get("pass_score", "").strip()
     conn = get_db()
+    exam = get_my_exam(conn, exam_id)
+    if not exam:
+        conn.close()
+        return "没有这场考试（或不是你的）"
     error = None
     try:
         max_s = float(max_s)
@@ -580,6 +655,10 @@ def update_subject(exam_id, cfg_id):
     max_s = request.form.get("max_score", "").strip()
     pass_s = request.form.get("pass_score", "").strip()
     conn = get_db()
+    exam = get_my_exam(conn, exam_id)
+    if not exam:
+        conn.close()
+        return "没有这场考试（或不是你的）"
     error = None
     try:
         max_s = float(max_s)
@@ -605,6 +684,9 @@ def update_subject(exam_id, cfg_id):
 def delete_subject(exam_id, cfg_id):
     subj = request.form.get("subject", "")
     conn = get_db()
+    if not get_my_exam(conn, exam_id):
+        conn.close()
+        return "没有这场考试（或不是你的）"
     conn.execute("DELETE FROM exam_subjects WHERE id=?", (cfg_id,))
     conn.execute("DELETE FROM scores WHERE exam_id=? AND subject=?",
                  (exam_id, subj))
@@ -618,6 +700,9 @@ def delete_subject(exam_id, cfg_id):
 def apply_template(exam_id):
     """一键补齐/重置为山东高考模板：缺的科目补上，已有科目不覆盖"""
     conn = get_db()
+    if not get_my_exam(conn, exam_id):
+        conn.close()
+        return "没有这场考试（或不是你的）"
     for subj, mx, ps in default_subjects():
         if not conn.execute("SELECT 1 FROM exam_subjects WHERE exam_id=? AND subject=?",
                             (exam_id, subj)).fetchone():
@@ -628,22 +713,34 @@ def apply_template(exam_id):
     return redirect(f"/exam/{exam_id}")
 
 
-# ----- 全班汇总：按某场考试排名 + 不及格名单 -----
+# ----- 全班汇总：按某场考试排名 + 不及格名单（只看自己班） -----
 @app.route("/summary")
 @login_required
 def summary():
     conn = get_db()
-    all_exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    uid = session.get("uid")
+    if session.get("user") == "admin":
+        all_exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    else:
+        all_exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
+                                 (uid,)).fetchall()
     exam_id = request.args.get("exam_id", type=int)
     if not exam_id and all_exams:
         exam_id = all_exams[0]["id"]
-    exam = conn.execute("SELECT * FROM exams WHERE id=?",
-                        (exam_id,)).fetchone() if exam_id else None
-    rows = conn.execute(
-        "SELECT st.id sid, st.name, s.subject, s.score, es.max_score, es.pass_score "
-        "FROM scores s JOIN students st ON s.student_id=st.id "
-        "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
-        "WHERE s.exam_id=? ORDER BY st.id", (exam_id,)).fetchall()
+    exam = get_my_exam(conn, exam_id) if exam_id else None
+    if session.get("user") == "admin":
+        rows = conn.execute(
+            "SELECT st.id sid, st.name, s.subject, s.score, es.max_score, es.pass_score "
+            "FROM scores s JOIN students st ON s.student_id=st.id "
+            "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
+            "WHERE s.exam_id=? ORDER BY st.id", (exam_id,)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT st.id sid, st.name, s.subject, s.score, es.max_score, es.pass_score "
+            "FROM scores s JOIN students st ON s.student_id=st.id "
+            "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
+            "WHERE s.exam_id=? AND st.teacher_id=? ORDER BY st.id",
+            (exam_id, uid)).fetchall()
     conn.close()
 
     # 按学生分组，算总分、平均分、不及格科数（及格线读 exam_subjects）
@@ -675,9 +772,10 @@ def summary():
 @login_required
 def delete_student(sid):
     conn = get_db()
-    conn.execute("DELETE FROM scores WHERE student_id=?", (sid,))   # 先删他的成绩
-    conn.execute("DELETE FROM students WHERE id=?", (sid,))          # 再删学生本人
-    conn.commit()
+    if get_my_student(conn, sid):
+        conn.execute("DELETE FROM scores WHERE student_id=?", (sid,))   # 先删他的成绩
+        conn.execute("DELETE FROM students WHERE id=?", (sid,))          # 再删学生本人
+        conn.commit()
     conn.close()
     return '<script>location.href="/"</script>'
 
@@ -689,13 +787,18 @@ def edit_score(score_id):
     conn = get_db()
     r = conn.execute(
         "SELECT s.id, s.subject, s.score, s.student_id, s.exam_id, st.name, "
-        "e.name exam_name, es.max_score, es.pass_score "
+        "st.teacher_id, e.name exam_name, es.max_score, es.pass_score "
         "FROM scores s JOIN students st ON s.student_id=st.id "
         "JOIN exams e ON s.exam_id=e.id "
         "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
         "WHERE s.id=?", (score_id,)).fetchone()
     if not r:
+        conn.close()
         return "没有这条成绩"
+    # 归属检查：非 admin 只能改自己班学生的成绩
+    if session.get("user") != "admin" and r["teacher_id"] != session.get("uid"):
+        conn.close()
+        return "不能修改其他老师的成绩"
 
     error = None
     if request.method == "POST":
@@ -723,10 +826,17 @@ def edit_score(score_id):
 @login_required
 def export_excel():
     conn = get_db()
-    # 所有考试
-    exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
-    # 所有学生
-    students = conn.execute("SELECT id, name FROM students ORDER BY id").fetchall()
+    uid = session.get("uid")
+    is_admin = session.get("user") == "admin"
+    # 只查自己的考试
+    if is_admin:
+        exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+        students = conn.execute("SELECT id, name FROM students ORDER BY id").fetchall()
+    else:
+        exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
+                             (uid,)).fetchall()
+        students = conn.execute("SELECT id, name FROM students WHERE teacher_id=? ORDER BY id",
+                                (uid,)).fetchall()
     # 所有成绩：key=(student_id, exam_id, subject) -> (score, pass_score)
     score_map = {}
     for r in conn.execute(
