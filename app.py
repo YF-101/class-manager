@@ -15,7 +15,7 @@ from urllib import request as urlreq
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from flask import (Flask, request, render_template, session,
-                   redirect, send_file)
+                   redirect, send_file, url_for)
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -312,7 +312,7 @@ def forgot_password():
                 send_email(email, "成绩系统 · 密码重置验证码",
                            f"您正在重置密码，验证码：{token}\n"
                            f"验证码 10 分钟内有效。若非本人操作，请忽略此邮件。")
-                info = f"验证码已发送到 {email}，请去邮箱查收（注意垃圾箱）"
+                return redirect(url_for("reset_password", email=email))
             except Exception as e:
                 error = f"邮件发送失败：{e}"
         conn.close()
@@ -347,7 +347,8 @@ def reset_password():
             conn.close()
             return redirect("/login?reset=1")
         conn.close()
-    return render_template("reset_password.html", error=error)
+    return render_template("reset_password.html", error=error,
+                           email=request.args.get("email", ""))
 
 
 # ----- 修改自己的密码 -----
