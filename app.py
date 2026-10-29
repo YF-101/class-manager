@@ -456,12 +456,12 @@ def student_page(sid):
     if not stu:
         return "没有这个学生"
     rows = get_student_scores(conn, sid)
-    all_exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
+    all_exams = [dict(e) for e in conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()]
 
     # 折线图：科目 -> {考试id: 分数}
     chart = {}
     for r in rows:
-        chart.setdefault(r["subject"], {})[r["exam_id"]] = r["score"]
+        chart.setdefault(r["subject"], {})[str(r["exam_id"])] = r["score"]
 
     conn.close()
     return render_template("student.html", stu=stu, rows=rows,
