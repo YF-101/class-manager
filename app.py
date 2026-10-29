@@ -61,12 +61,23 @@ def get_db():
 
 
 def send_email(to_addr, subject, body):
-    """统一发信入口：优先 Brevo → Mailjet → SMTP（公网用 HTTP API，本地用 SMTP）"""
+    """统一发信入口：优先 Google Apps Script(Gmail) → Brevo → Mailjet → SMTP"""
+    if os.environ.get("GAPPS_URL"):
+        return send_email_via_gapps(to_addr, subject, body)
     if os.environ.get("BREVO_API_KEY"):
         return send_email_via_brevo(to_addr, subject, body)
     if os.environ.get("MAILJET_KEY"):
         return send_email_via_mailjet(to_addr, subject, body)
     return send_email_via_smtp(to_addr, subject, body)
+
+
+def send_email_via_gapps(to_addr, subject, body):
+    """通过 Google Apps Script(Gmail) 发邮件（免费，每天100封）"""
+    from urllib.parse import urlencode
+    base = os.environ.get("GAPPS_URL")
+    url = base + "?" + urlencode({"to": to_addr, "subject": subject, "body": body})
+    with urlreq.urlopen(url, timeout=30) as resp:
+        return resp.status
 
 
 def send_email_via_brevo(to_addr, subject, body):
