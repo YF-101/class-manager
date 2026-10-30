@@ -560,6 +560,33 @@ def add_student():
     return redirect(url_for('index', class_id=request.form.get('class_id') or ''))
 
 
+@app.route('/edit_student/<int:sid>', methods=['GET', 'POST'])
+@login_required
+def edit_student(sid):
+    error = None
+    with database(write=request.method == 'POST') as conn:
+        student = require_student(conn, sid)
+        classes = own_classes(conn)
+        if request.method == 'POST':
+            name = request.form.get('name', '').strip()
+            code = request.form.get('student_code', '').strip()
+            target = requested_class(conn, request.form.get('class_id'))
+            if not 1 <= len(name) <= 100:
+                error = '学生姓名长度需为1至100位'
+            elif len(code) > 50:
+                error = '学号长度不能超过50位'
+            elif conn.execute('SELECT 1 FROM students WHERE id!=? AND name=? AND class_id=?', (sid, name, target['id'])).fetchone():
+                error = '该班级已有同名学生'
+            elif code and conn.execute('SELECT 1 FROM students WHERE id!=? AND student_code=? AND class_id=?', (sid, code, target['id'])).fetchone():
+                error = f'该班级已有学号：{code}'
+            else:
+                conn.execute('UPDATE students SET name=?,student_code=?,teacher_id=?,class_id=? WHERE id=?', (name, code or None, target['teacher_id'], target['id'], sid))
+                flash('学生档案已更新。')
+                return redirect(url_for('index', class_id=target['id']))
+        classes = own_classes(conn)
+    return render_template('edit_student.html', student=student, classes=classes, error=error)
+
+
 @app.route('/classes')
 @login_required
 def class_list():

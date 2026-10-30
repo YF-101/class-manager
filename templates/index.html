@@ -30,6 +30,7 @@
       <span class="links">
         <a href="/score/{{ s.id }}">✏️ 录成绩</a>
         <a href="/student/{{ s.id }}">📊 看成绩</a>
+        <a href="/edit_student/{{ s.id }}">✏️ 档案</a>
         <form action="/delete/{{ s.id }}" method="post" style="display:inline;"
               onsubmit="return confirm('确定执行此操作吗？');">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

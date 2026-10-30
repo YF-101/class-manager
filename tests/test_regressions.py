@@ -329,6 +329,13 @@ class SiteTests(unittest.TestCase):
         cid=self.sql("SELECT id FROM classes WHERE name='学号测试二班'")[0][0]
         self.assertEqual(self.post(self.a,'/add',{'name':'另一班学生','student_code':'A001','class_id':cid}).status_code,302)
 
+    def test_edit_student_profile_and_move_class(self):
+        sid = self.sa
+        self.post(self.a, f'/edit_student/{sid}', {'name':'学生甲改名','student_code':'A100','class_id':self.sql("SELECT id FROM classes WHERE teacher_id=(SELECT id FROM users WHERE username='teacher_a') ORDER BY id LIMIT 1")[0][0]})
+        row=self.sql('SELECT name,student_code FROM students WHERE id=?',(sid,))[0]
+        self.assertEqual((row['name'],row['student_code']),('学生甲改名','A100'))
+        self.assertEqual(self.b.get(f'/edit_student/{sid}').status_code,404)
+
     def test_admin_created_user_forced_to_change_password(self):
         self.post(self.admin,'/add_user',{'username':'new_teacher','email':'new@example.invalid','password':'InitialPass123!'})
         c=self.client('new_teacher','InitialPass123!')
