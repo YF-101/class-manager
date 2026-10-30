@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>🏫 创建班级</h2>
+  <form action="/create_class" method="post" style="display:flex; gap:10px; flex-wrap:wrap;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input name="name" placeholder="如：2026级1班" required style="flex:1; min-width:180px;">
+    <input name="grade" placeholder="年级（可选）" style="width:140px;">
+    <input name="school_year" placeholder="学年（可选）" style="width:140px;">
+    <button class="btn btn-green">创建班级</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>📚 我的班级</h2>
+  {% if classes %}
+  <div class="table-scroll"><table>
+    <thead><tr><th>班级</th><th>年级</th><th>学年</th><th>学生数</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for c in classes %}
+      <tr>
+        <td>{{ c.name }}</td><td>{{ c.grade or '—' }}</td><td>{{ c.school_year or '—' }}</td>
+        <td>{{ counts.get(c.id, 0) }} 人</td><td><a href="/?class_id={{ c.id }}">进入班级</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="muted">还没有班级，请先创建一个。</p>{% endif %}
+</div>
+{% endblock %}

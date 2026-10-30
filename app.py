@@ -9,6 +9,7 @@ import secrets
 import hmac
 import hashlib
 import smtplib
+from time import time as unix_time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from functools import wraps
@@ -185,6 +186,38 @@ def own_exams(conn):
     if is_admin():
         return conn.execute('SELECT * FROM exams ORDER BY id').fetchall()
     return conn.execute('SELECT * FROM exams WHERE teacher_id=? ORDER BY id', (g.user['id'],)).fetchall()
+
+
+def own_classes(conn, include_inactive=False):
+    clause = '' if include_inactive else ' AND active=1'
+    if is_admin():
+        return conn.execute(f'SELECT * FROM classes WHERE 1=1{clause} ORDER BY teacher_id,id').fetchall()
+    return conn.execute(f'SELECT * FROM classes WHERE teacher_id=?{clause} ORDER BY id', (g.user['id'],)).fetchall()
+
+
+def get_my_class(conn, cid):
+    if is_admin():
+        return conn.execute('SELECT * FROM classes WHERE id=? AND active=1', (cid,)).fetchone()
+    return conn.execute('SELECT * FROM classes WHERE id=? AND teacher_id=? AND active=1', (cid, g.user['id'])).fetchone()
+
+
+def default_class(conn):
+    row = conn.execute('SELECT * FROM classes WHERE teacher_id=? AND active=1 ORDER BY id LIMIT 1', (g.user['id'],)).fetchone()
+    if row:
+        return row
+    cid = conn.execute('INSERT INTO classes(teacher_id,name,created_at) VALUES(?,?,?)', (g.user['id'], '默认班级', unix_time())).lastrowid
+    return conn.execute('SELECT * FROM classes WHERE id=?', (cid,)).fetchone()
+
+
+def requested_class(conn, value=None):
+    try:
+        cid = int(value) if value not in (None, '') else None
+    except (TypeError, ValueError):
+        abort(400, description='班级编号无效。')
+    row = get_my_class(conn, cid) if cid is not None else default_class(conn)
+    if row is None:
+        abort(404, description='没有这个班级，或你没有访问权限。')
+    return row
 
 
 def consume_limits(limits):
@@ -500,8 +533,10 @@ def enable_user(uid):
 @login_required
 def index():
     with database() as conn:
-        students = conn.execute('SELECT * FROM students ORDER BY id').fetchall() if is_admin() else conn.execute('SELECT * FROM students WHERE teacher_id=? ORDER BY id', (g.user['id'],)).fetchall()
-    return render_template('index.html', students=students)
+        classes = own_classes(conn)
+        cur_class = requested_class(conn, request.args.get('class_id'))
+        students = conn.execute('SELECT * FROM students WHERE class_id=? ORDER BY id', (cur_class['id'],)).fetchall()
+    return render_template('index.html', students=students, classes=classes, cur_class=cur_class)
 
 
 @app.route('/add', methods=['POST'])
@@ -512,11 +547,46 @@ def add_student():
         flash('学生姓名长度需为1至100位')
     else:
         with database(write=True) as conn:
-            if conn.execute('SELECT 1 FROM students WHERE name=? AND teacher_id=?', (name, g.user['id'])).fetchone():
+            cur_class = requested_class(conn, request.form.get('class_id'))
+            if conn.execute('SELECT 1 FROM students WHERE name=? AND class_id=?', (name, cur_class['id'])).fetchone():
                 flash(f'已存在同名学生：{name}')
             else:
-                conn.execute('INSERT INTO students(name,teacher_id) VALUES(?,?)', (name, g.user['id']))
-    return redirect(url_for('index'))
+                conn.execute('INSERT INTO students(name,teacher_id,class_id) VALUES(?,?,?)', (name, cur_class['teacher_id'], cur_class['id']))
+    return redirect(url_for('index', class_id=request.form.get('class_id') or ''))
+
+
+@app.route('/classes')
+@login_required
+def class_list():
+    with database() as conn:
+        classes = own_classes(conn)
+        counts = {c['id']: conn.execute('SELECT COUNT(*) FROM students WHERE class_id=?', (c['id'],)).fetchone()[0] for c in classes}
+    return render_template('classes.html', classes=classes, counts=counts)
+
+
+@app.route('/create_class', methods=['POST'])
+@login_required
+def create_class():
+    name = request.form.get('name', '').strip()
+    grade = request.form.get('grade', '').strip() or None
+    school_year = request.form.get('school_year', '').strip() or None
+    with database(write=True) as conn:
+        if not 1 <= len(name) <= 80:
+            flash('班级名称长度需为1至80位')
+        elif conn.execute('SELECT 1 FROM classes WHERE teacher_id=? AND name=?', (g.user['id'], name)).fetchone():
+            flash('你已经有同名班级')
+        else:
+            conn.execute('INSERT INTO classes(teacher_id,name,grade,school_year,created_at) VALUES(?,?,?,?,?)', (g.user['id'], name, grade, school_year, unix_time()))
+            flash('班级已创建。')
+    return redirect(url_for('class_list'))
+
+
+@app.route('/select_class', methods=['POST'])
+@login_required
+def select_class():
+    with database() as conn:
+        cur_class = requested_class(conn, request.form.get('class_id'))
+    return redirect(url_for('index', class_id=cur_class['id']))
 
 def normalise_score(row):
     record = dict(row)
@@ -634,9 +704,11 @@ def help_page():
 @login_required
 def exam_list():
     with database() as conn:
-        exams = own_exams(conn)
+        classes = own_classes(conn)
+        cur_class = requested_class(conn, request.args.get('class_id'))
+        exams = conn.execute('SELECT * FROM exams WHERE class_id=? ORDER BY id', (cur_class['id'],)).fetchall()
         counts = {e['id']: conn.execute('SELECT COUNT(*) FROM scores WHERE exam_id=?', (e['id'],)).fetchone()[0] for e in exams}
-    return render_template('exams.html', exams=exams, counts=counts, error=None)
+    return render_template('exams.html', exams=exams, counts=counts, classes=classes, cur_class=cur_class, error=None)
 
 
 @app.route('/create_exam', methods=['POST'])
@@ -644,15 +716,16 @@ def exam_list():
 def create_exam():
     name = request.form.get('name', '').strip()
     with database(write=True) as conn:
+        cur_class = requested_class(conn, request.form.get('class_id'))
         if not 1 <= len(name) <= 100:
             flash('考试名称长度需为1至100位')
-        elif conn.execute('SELECT 1 FROM exams WHERE teacher_id=? AND name=?', (g.user['id'], name)).fetchone():
+        elif conn.execute('SELECT 1 FROM exams WHERE class_id=? AND name=?', (cur_class['id'], name)).fetchone():
             flash('已存在同名考试')
         else:
-            eid = conn.execute('INSERT INTO exams(name,teacher_id) VALUES(?,?)', (name, g.user['id'])).lastrowid
+            eid = conn.execute('INSERT INTO exams(name,teacher_id,class_id) VALUES(?,?,?)', (name, cur_class['teacher_id'], cur_class['id'])).lastrowid
             conn.executemany('INSERT INTO exam_subjects(exam_id,subject,max_score,pass_score) VALUES(?,?,?,?)', [(eid, subject, maximum, passing) for subject, maximum, passing in default_subjects()])
             return redirect(url_for('exam_config', exam_id=eid))
-    return redirect(url_for('exam_list'))
+    return redirect(url_for('exam_list', class_id=request.form.get('class_id') or ''))
 
 
 @app.route('/delete_exam/<int:exam_id>', methods=['POST'])

@@ -8,9 +8,18 @@
 {% endif %}
 
 <div class="card">
+  <h2>🏫 当前班级：{{ cur_class.name }}</h2>
+  <form action="/select_class" method="post" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <select name="class_id" onchange="this.form.submit()" aria-label="选择班级">
+      {% for c in classes %}<option value="{{ c.id }}" {% if c.id == cur_class.id %}selected{% endif %}>{{ c.name }}{% if c.grade %} · {{ c.grade }}{% endif %}</option>{% endfor %}
+    </select>
+    <a href="/classes" class="btn btn-blue" style="display:inline-block;">管理班级</a>
+  </form>
   <h2>➕ 创建新考试</h2>
   <form action="/create_exam" method="post" style="display:flex; gap:10px; flex-wrap:wrap;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="class_id" value="{{ cur_class.id }}">
     <input name="name" placeholder="考试名称，如 周考 / 高考模拟 / 第三次月考" style="flex:1; min-width:220px;">
     <button class="btn btn-green">创建并配置科目</button>
   </form>

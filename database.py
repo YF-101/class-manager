@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def connect(path):
@@ -77,8 +77,9 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
                 return
         definitions = [
             'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, email TEXT)',
-            'CREATE TABLE IF NOT EXISTS students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER)',
-            'CREATE TABLE IF NOT EXISTS exams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER)',
+            'CREATE TABLE IF NOT EXISTS classes (id INTEGER PRIMARY KEY AUTOINCREMENT, teacher_id INTEGER NOT NULL, name TEXT NOT NULL, grade TEXT, school_year TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL DEFAULT 0, UNIQUE(teacher_id,name))',
+            'CREATE TABLE IF NOT EXISTS students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER, class_id INTEGER)',
+            'CREATE TABLE IF NOT EXISTS exams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER, class_id INTEGER)',
             'CREATE TABLE IF NOT EXISTS exam_subjects (id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, subject TEXT, max_score REAL, pass_score REAL, FOREIGN KEY(exam_id) REFERENCES exams(id))',
             'CREATE TABLE IF NOT EXISTS scores (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id INTEGER, exam_id INTEGER, subject TEXT, score REAL, exam TEXT, FOREIGN KEY(student_id) REFERENCES students(id))',
             'CREATE TABLE IF NOT EXISTS reset_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, token TEXT, expires_at REAL)',
@@ -87,8 +88,8 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             conn.execute(statement)
         additions = {
             'users': {'email': 'TEXT', 'active': 'INTEGER NOT NULL DEFAULT 1', 'session_version': 'INTEGER NOT NULL DEFAULT 1', 'must_change_password': 'INTEGER NOT NULL DEFAULT 0'},
-            'students': {'teacher_id': 'INTEGER'},
-            'exams': {'teacher_id': 'INTEGER'},
+            'students': {'teacher_id': 'INTEGER', 'class_id': 'INTEGER'},
+            'exams': {'teacher_id': 'INTEGER', 'class_id': 'INTEGER'},
             'scores': {'exam_id': 'INTEGER', 'exam': 'TEXT', 'status': "TEXT NOT NULL DEFAULT 'recorded'"},
             'reset_tokens': {'attempts': 'INTEGER NOT NULL DEFAULT 0', 'created_at': 'REAL NOT NULL DEFAULT 0', 'delivered': 'INTEGER NOT NULL DEFAULT 0'},
         }
@@ -106,8 +107,8 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
                 global_unique |= columns == ['name']
         if global_unique:
             sequence = conn.execute("SELECT seq FROM sqlite_sequence WHERE name='exams'").fetchone() if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone() else None
-            conn.execute('CREATE TABLE exams_upgrade (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER)')
-            conn.execute('INSERT INTO exams_upgrade SELECT id,name,teacher_id FROM exams')
+            conn.execute('CREATE TABLE exams_upgrade (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER, class_id INTEGER)')
+            conn.execute('INSERT INTO exams_upgrade SELECT id,name,teacher_id,class_id FROM exams')
             conn.execute('DROP TABLE exams')
             conn.execute('ALTER TABLE exams_upgrade RENAME TO exams')
             if sequence:
@@ -129,6 +130,15 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
                 conn.execute('UPDATE users SET must_change_password=1 WHERE id=?', (admin['id'],))
             for table in ['students', 'exams']:
                 conn.execute(f'UPDATE {table} SET teacher_id=? WHERE teacher_id IS NULL', (admin['id'],))
+        # Give every existing owner a default class, then attach legacy records.
+        owners = conn.execute('SELECT id FROM users').fetchall()
+        now = datetime.now(timezone.utc).timestamp()
+        for owner in owners:
+            conn.execute('INSERT OR IGNORE INTO classes(teacher_id,name,grade,school_year,created_at) VALUES(?,?,?,?,?)',
+                         (owner['id'], '默认班级', None, None, now))
+            class_row = conn.execute('SELECT id FROM classes WHERE teacher_id=? AND name=?', (owner['id'], '默认班级')).fetchone()
+            for table in ['students', 'exams']:
+                conn.execute(f'UPDATE {table} SET class_id=? WHERE teacher_id=? AND class_id IS NULL', (class_row['id'], owner['id']))
         # Migrate pre-exam_id databases without overwriting any existing associations.
         legacy = conn.execute('SELECT s.*,st.teacher_id FROM scores s JOIN students st ON st.id=s.student_id WHERE s.exam_id IS NULL').fetchall()
         defaults = dict((s, (mx, ps)) for s, mx, ps in default_subjects())
@@ -148,6 +158,9 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             ('subjects_lookup', 'exam_subjects', 'exam_id,subject'),
             ('students_owner', 'students', 'teacher_id'),
             ('exams_owner', 'exams', 'teacher_id'),
+            ('classes_owner', 'classes', 'teacher_id'),
+            ('students_class', 'students', 'class_id'),
+            ('exams_class', 'exams', 'class_id'),
         ]:
             conn.execute(f'CREATE INDEX IF NOT EXISTS {name} ON {table}({cols})')
         # Existing invalid legacy records are kept for repair. New writes must be valid.

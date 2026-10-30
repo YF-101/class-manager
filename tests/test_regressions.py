@@ -309,6 +309,18 @@ class SiteTests(unittest.TestCase):
         self.assertEqual(response.status_code,302)
         self.assertIn('尚未登记邮箱',legacy.get('/').text)
 
+    def test_multiple_classes_isolate_students_and_exams(self):
+        response=self.post(self.a,'/create_class',{'name':'二班','grade':'七年级'})
+        self.assertEqual(response.status_code,302)
+        second=self.sql("SELECT id FROM classes WHERE teacher_id=(SELECT id FROM users WHERE username='teacher_a') AND name='二班'")[0][0]
+        self.assertEqual(self.a.get('/classes').status_code,200)
+        self.post(self.a,'/add',{'name':'二班学生','class_id':second})
+        self.post(self.a,'/create_exam',{'name':'二班期中','class_id':second})
+        self.assertIn('二班学生',self.a.get(f'/?class_id={second}').text)
+        self.assertNotIn('二班学生',self.a.get('/').text)
+        self.assertIn('二班期中',self.a.get(f'/exams?class_id={second}').text)
+        self.assertNotIn('二班期中',self.a.get('/exams').text)
+
     def test_admin_created_user_forced_to_change_password(self):
         self.post(self.admin,'/add_user',{'username':'new_teacher','email':'new@example.invalid','password':'InitialPass123!'})
         c=self.client('new_teacher','InitialPass123!')
