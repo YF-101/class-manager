@@ -93,3 +93,19 @@ python migrate.py
 保持 GApps → Brevo → Mailjet → SMTP 的配置优先选择顺序。一次发送选定一个已配置通道；失败会提示稍后重试，不自动切换到另一通道，避免超时后重复发送。验证码只有在发送调用成功后才可验证；真实送达仍需联调。
 
 GApps 当前使用已有 GET 接口，后续若改为带鉴权的 POST，需同步修改 Google Apps Script。仅凭 Python 仓库无法验证或修复远端脚本是否限制第三方调用。
+
+
+## 2026-10-30 实际部署记录
+
+- 公网 Web 使用 Python3.10，独立虚拟环境为 `/home/1039535644/.virtualenvs/class-manager`。
+- 后续更新依赖、运行迁移和备份时，使用该环境的绝对 Python 路径。
+- 生产配置位于 `~/.class_manager_env`，已启用生产模式、独立随机密钥和 Secure Cookie；PythonAnywhere 已启用强制 HTTPS。
+- 首次上线在服务器 Python3.10 环境运行40项回归测试通过。测试日志保存在 `/home/1039535644/class-manager-release-tests.log`。
+- 部署前一致性备份保存在 `/home/1039535644/.class_manager_backups/before-release-20261030-010529.db`，自动迁移也另外创建了备份。部署前后五张业务表原有列数据与ID逐项一致。
+- 本账号的 Tasks 页面明确提示计划任务仅付费账号开放，因此未创建每日定时任务。免费账号可在每次重要录入后手动执行下面的备份命令，无需升级付费计划：
+
+```bash
+/home/1039535644/.virtualenvs/class-manager/bin/python /home/1039535644/class_manager/backup.py
+```
+
+真实邮件发送与收件未在部署过程中触发，原邮件配置已保留。
