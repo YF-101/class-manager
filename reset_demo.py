@@ -51,9 +51,16 @@ def score_for(full, pass_line):
 
 
 def main():
-    conn = sqlite3.connect(DB)
+    # Initialise schema and snapshot before this intentionally destructive demo reset.
+    from app import DB as configured_db, BACKUP_DIR
+    from database import backup_database
+    backup_database(configured_db, BACKUP_DIR)
+    conn = sqlite3.connect(configured_db)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+    admin = cur.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+    teacher_id = admin['id']
+    conn.execute('BEGIN IMMEDIATE')
 
     # 1. 清空旧数据（保留 users / reset_tokens）
     cur.execute("DELETE FROM scores")
@@ -66,7 +73,7 @@ def main():
     # 2. 创建考试
     exam_ids = {}
     for name in EXAMS:
-        cur.execute("INSERT INTO exams (name) VALUES (?)", (name,))
+        cur.execute("INSERT INTO exams (name,teacher_id) VALUES (?,?)", (name,teacher_id))
         exam_ids[name] = cur.lastrowid
 
     # 3. 配置每科满分/及格线
@@ -80,7 +87,7 @@ def main():
     # 4. 生成学生和成绩
     names = gen_names(12)
     for name in names:
-        cur.execute("INSERT INTO students (name) VALUES (?)", (name,))
+        cur.execute("INSERT INTO students (name,teacher_id) VALUES (?,?)", (name,teacher_id))
         sid = cur.lastrowid
         for exam_name, eid in exam_ids.items():
             for subj, full, pass_line in SUBJECTS:

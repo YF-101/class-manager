@@ -1,70 +1,42 @@
 {% extends "base.html" %}
 {% block content %}
-
-{% if error %}
-<p style="background:#fee2e2;color:#b91c1c;padding:12px;border-radius:8px;margin-bottom:16px;font-size:14px;">
-  ⚠️ {{ error }}
-</p>
-{% endif %}
-
 <div class="card">
   <h2>⚙️ 配置「{{ exam.name }}」的科目</h2>
-  <p style="font-size:13px; color:#6b7280; margin-bottom:12px;">
-    在这里设置这场考试每个科目的<strong>满分</strong>和<strong>及格线</strong>；录成绩、判断不及格、排名都会按这里的配置走
-  </p>
-  <form action="/exam/{{ exam.id }}/apply_template" method="post" style="display:inline;">
+  <p style="margin-bottom:12px">设置每科满分与及格线。已有成绩高于新满分时，会阻止下调满分。</p>
+  <form action="/exam/{{ exam.id }}/apply_template" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button class="btn btn-blue">一键补齐山东高考模板</button>
   </form>
-  <a href="/exams" style="margin-left:8px; font-size:13px;">← 返回考试列表</a>
+  <p style="margin-top:12px"><a href="/exams">← 返回考试列表</a></p>
 </div>
-
 <div class="card">
   <h2>科目与满分/及格线</h2>
-  {% if subs %}
-  <table>
-    <thead>
-      <tr><th>科目</th><th>满分</th><th>及格线</th><th>操作</th></tr>
-    </thead>
-    <tbody>
-      {% for s in subs %}
-      <tr>
-        <td>{{ s.subject }}</td>
-        <td colspan="3" style="padding:0;">
-          <form action="/exam/{{ exam.id }}/update_subject/{{ s.id }}" method="post"
-                style="display:flex; gap:8px; align-items:center; padding:8px;">
-            <input name="max_score" value="{{ s.max_score | num }}" style="width:90px;">
-            <input name="pass_score" value="{{ s.pass_score | num }}" style="width:90px;">
-            <button class="btn btn-green" style="padding:6px 12px; font-size:12px;">保存</button>
-          </form>
-        </td>
-        <td>
-          <form action="/exam/{{ exam.id }}/delete_subject/{{ s.id }}" method="post"
-                onsubmit="return confirm('删除科目 {{ s.subject }}？该科成绩会一并删除！');">
-            <input type="hidden" name="subject" value="{{ s.subject }}">
-            <button class="btn btn-delete">删除</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">还没有科目，点上方"一键补齐模板"，或在下方添加</p>
-  {% endif %}
+  <div class="subject-grid">
+    {% for s in subs %}
+    <section class="subject-card">
+      <h3>{{ s.subject }}</h3>
+      <form action="/exam/{{ exam.id }}/update_subject/{{ s.id }}" method="post" class="subject-fields">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>满分<input name="max_score" value="{{ s.max_score | num }}" inputmode="decimal" required></label>
+        <label>及格线<input name="pass_score" value="{{ s.pass_score | num }}" inputmode="decimal" required></label>
+        <button class="btn btn-green">保存</button>
+      </form>
+      <form action="/exam/{{ exam.id }}/delete_subject/{{ s.id }}" method="post" class="subject-delete" onsubmit="return confirm('删除此科目及其全部成绩？此操作不可恢复。');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-delete">删除科目及成绩</button>
+      </form>
+    </section>
+    {% else %}<p class="muted">还没有科目，请补齐模板或添加自定义科目。</p>{% endfor %}
+  </div>
 </div>
-
 <div class="card">
   <h2>➕ 添加自定义科目</h2>
-  <form action="/exam/{{ exam.id }}/add_subject" method="post"
-        style="display:flex; gap:10px; flex-wrap:wrap;">
-    <input name="subject" placeholder="科目名，如 政治 / 信息技术" style="flex:1; min-width:130px;">
-    <input name="max_score" placeholder="满分" style="width:100px;">
-    <input name="pass_score" placeholder="及格线(可空)" style="width:120px;">
+  <form action="/exam/{{ exam.id }}/add_subject" method="post" class="subject-fields">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>科目名<input name="subject" placeholder="如：政治 / 信息技术" maxlength="50" required></label>
+    <label>满分<input name="max_score" inputmode="decimal" required></label>
+    <label>及格线<input name="pass_score" placeholder="可空，默认60%" inputmode="decimal"></label>
     <button class="btn btn-green">添加</button>
   </form>
-  <p style="margin-top:12px; font-size:13px; color:#6b7280;">
-    及格线留空则默认按满分的 60% 计算
-  </p>
 </div>
-
 {% endblock %}

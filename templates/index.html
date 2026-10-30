@@ -4,6 +4,7 @@
 <div class="card">
   <h2>➕ 添加学生</h2>
   <form action="/add" method="post" style="display:flex; gap:10px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input name="name" placeholder="输入学生姓名" style="flex:1;">
     <button class="btn btn-green">添加学生</button>
   </form>
@@ -20,7 +21,8 @@
         <a href="/score/{{ s.id }}">✏️ 录成绩</a>
         <a href="/student/{{ s.id }}">📊 看成绩</a>
         <form action="/delete/{{ s.id }}" method="post" style="display:inline;"
-              onsubmit="return confirm('确定删除 {{ s.name }} 吗？此操作不可恢复');">
+              onsubmit="return confirm('确定执行此操作吗？');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button class="btn btn-delete">🗑️ 删除</button>
         </form>
       </span>

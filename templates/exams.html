@@ -10,6 +10,7 @@
 <div class="card">
   <h2>➕ 创建新考试</h2>
   <form action="/create_exam" method="post" style="display:flex; gap:10px; flex-wrap:wrap;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input name="name" placeholder="考试名称，如 周考 / 高考模拟 / 第三次月考" style="flex:1; min-width:220px;">
     <button class="btn btn-green">创建并配置科目</button>
   </form>
@@ -21,7 +22,7 @@
 <div class="card">
   <h2>📚 全部考试</h2>
   {% if exams %}
-  <table>
+  <div class="table-scroll"><table>
     <thead>
       <tr><th>ID</th><th>考试名称</th><th>已录成绩</th><th>操作</th></tr>
     </thead>
@@ -34,14 +35,15 @@
         <td>
           <a href="/exam/{{ e.id }}">⚙️ 配置科目</a>
           <form action="/delete_exam/{{ e.id }}" method="post" style="display:inline;"
-                onsubmit="return confirm('确定删除考试 {{ e.name }}？该考试的成绩会一并删除！');">
+                onsubmit="return confirm('确定执行此操作吗？');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn btn-delete" style="margin-left:8px;">删除</button>
           </form>
         </td>
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
   {% else %}
   <p class="muted">还没有考试，先在上方创建</p>
   {% endif %}

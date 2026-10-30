@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="zh">
 <head>
+<link rel="icon" href="data:,">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>注册 · 班主任学生成绩系统</title>
@@ -54,10 +55,12 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
   <div class="error">⚠️ {{ error }}</div>
   {% endif %}
 
+  {% include "messages.html" %}
   <form action="/register" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="field">
       <label>用户名</label>
-      <input name="username" placeholder="给自己起个用户名" autofocus>
+      <input autocomplete="username" name="username" placeholder="给自己起个用户名" autofocus>
     </div>
     <div class="field">
       <label>邮箱（选填，用于找回密码）</label>
@@ -65,11 +68,11 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
     </div>
     <div class="field">
       <label>密码</label>
-      <input type="password" name="password" placeholder="至少 6 位">
+      <input autocomplete="new-password" type="password" name="password" placeholder="至少 8 位">
     </div>
     <div class="field">
       <label>确认密码</label>
-      <input type="password" name="confirm" placeholder="再输入一次密码">
+      <input autocomplete="new-password" type="password" name="confirm" placeholder="再输入一次密码">
     </div>
     <button class="btn">注 册</button>
   </form>

@@ -12,8 +12,10 @@
   <p style="font-size:13px; color:#6b7280; margin-bottom:12px;">
     考试：{{ rec.exam_name }} ｜ 满分 {{ rec.max_score | num }} ｜ 及格线 {{ rec.pass_score | num }}
   </p>
-  <form action="/edit_score/{{ rec.id }}" method="post" style="display:flex; gap:10px;">
-    <input name="score" placeholder="当前成绩：{{ rec.score | num }}" value="{{ rec.score | num }}" style="flex:1;">
+  <form action="/edit_score/{{ rec.id }}" method="post" style="display:flex; gap:10px; flex-wrap:wrap;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <select name="status" aria-label="成绩状态"><option value="recorded" {% if rec.status == 'recorded' %}selected{% endif %}>正常成绩</option><option value="absent" {% if rec.status == 'absent' %}selected{% endif %}>缺考</option></select>
+    <input inputmode="decimal" name="score" placeholder="当前成绩：{{ rec.score | num }}" value="{{ rec.score | num if rec.status == 'recorded' and rec.valid else '' }}" style="flex:1;">
     <button class="btn btn-green">保存修改</button>
   </form>
   <p style="margin-top:14px; font-size:13px;"><a href="/score/{{ rec.student_id }}?exam_id={{ rec.exam_id }}">← 返回</a></p>

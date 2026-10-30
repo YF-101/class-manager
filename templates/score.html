@@ -20,21 +20,23 @@
 
   {% if cur_subs %}
   <form action="/score/{{ stu.id }}" method="post" style="display:flex; gap:10px; flex-wrap:wrap;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="exam_id" value="{{ cur_exam.id }}">
     <select name="subject">
       {% for s in cur_subs %}
       <option value="{{ s.subject }}">{{ s.subject }}（满分 {{ s.max_score | num }}）</option>
       {% endfor %}
     </select>
-    <input name="score" placeholder="分数">
+    <select name="status" aria-label="成绩状态"><option value="recorded">正常成绩</option><option value="absent">缺考（无需填分）</option></select>
+    <input name="score" inputmode="decimal" placeholder="分数">
     <button class="btn btn-green">保存</button>
   </form>
   <p style="margin-top:12px; font-size:13px; color:#6b7280;">
     同一考试同一科目重复保存会自动覆盖旧成绩
   </p>
   {% else %}
-  <p class="muted">这场考试还没有配置科目，请先
-    <a href="/exam/{{ cur_exam.id }}">点此配置科目</a></p>
+  <p class="muted">{% if cur_exam %}这场考试还没有配置科目，请先 <a href="/exam/{{ cur_exam.id }}">点此配置科目</a>
+    {% else %}请先到 <a href="/exams">考试管理</a> 创建考试{% endif %}</p>
   {% endif %}
   <p style="margin-top:12px; font-size:13px;"><a href="/">← 返回名单</a></p>
 </div>
@@ -42,25 +44,29 @@
 <div class="card">
   <h2>已有成绩</h2>
   {% if rows %}
-  <table>
+  <div class="table-scroll"><table>
     <thead>
-      <tr><th>考试</th><th>科目</th><th>分数</th><th>状态</th><th>操作</th></tr>
+      <tr><th>考试</th><th>科目</th><th>分数</th><th>状态</th><th class="no-print">操作</th></tr>
     </thead>
     <tbody>
       {% for r in rows %}
       <tr>
         <td>{{ r.exam_name }}</td>
         <td>{{ r.subject }}</td>
-        <td class="{% if r.score < r.pass_score %}fail{% endif %}">{{ r.score | num }}</td>
+        <td class="{% if r.fail %}fail{% endif %}">{{ r.display }}</td>
         <td>
-          {% if r.score < r.pass_score %}<span class="badge badge-fail">⚠️ 不及格</span>
+          {% if not r.valid %}<span class="badge badge-fail">数据异常，请修正配置或成绩</span>
+          {% elif r.status == "absent" %}<span class="badge">缺考</span>
+          {% elif r.fail %}<span class="badge badge-fail">⚠️ 不及格</span>
           {% else %}<span class="badge badge-ok">✅ 及格</span>{% endif %}
         </td>
-        <td><a href="/edit_score/{{ r.id }}">✏️ 修改</a></td>
+        <td class="no-print"><a href="/edit_score/{{ r.id }}">✏️ 修改</a>
+          <form action="/delete_score/{{ r.id }}" method="post" style="display:inline" onsubmit="return confirm('确定删除这条成绩吗？');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-delete">删除</button></form></td>
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
   {% else %}
   <p class="muted">还没有成绩，先在上方录入</p>
   {% endif %}

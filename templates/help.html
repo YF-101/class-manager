@@ -11,7 +11,7 @@
   </p>
 
   <h3 style="margin:18px 0 6px; color:#1e3a8a;">主要功能</h3>
-  <table>
+  <div class="table-scroll"><table>
     <tr><th style="width:130px;">功能</th><th>怎么用</th></tr>
     <tr><td>👥 学生名单</td><td>添加班里的学生（姓名不能重复）。</td></tr>
     <tr><td>📚 考试管理</td><td>创建考试（如月考、期中、期末），并设置每科满分和及格线。</td></tr>
@@ -20,8 +20,8 @@
     <tr><td>📊 全班汇总</td><td>一次看全班所有人所有科目的成绩，不及格的标红。</td></tr>
     <tr><td>📥 导出 Excel</td><td>把全班成绩下载成 .xlsx 文件，不及格自动标红，方便打印。</td></tr>
     <tr><td>🖨️ 打印成绩单</td><td>学生详情页可以直接打印或存成 PDF。</td></tr>
-    <tr><td>👤 用户管理</td><td>管理员（admin）可以注册新老师账号、重置密码。</td></tr>
-  </table>
+    <tr><td>👤 用户管理</td><td>管理员（admin）可以添加、停用和恢复老师账号；老师可通过注册邮箱找回密码。</td></tr>
+  </table></div>
 
   <h3 style="margin:18px 0 6px; color:#1e3a8a;">分数标准（默认按山东高考）</h3>
   <ul style="font-size:14px; line-height:1.9; color:#374151; padding-left:20px;">
@@ -35,7 +35,7 @@
   <h3 style="margin:18px 0 6px; color:#1e3a8a;">数据安全</h3>
   <p style="font-size:14px; line-height:1.8; color:#374151;">
     每位老师用自己的账号登录，数据存在服务器上，<strong>不依赖你自己的电脑</strong>，
-    关机也不影响别人使用。建议定期导出 Excel 备份。
+    关机也不影响别人使用。老师可导出 Excel 留存；管理员需定期备份完整数据库，恢复方法见部署文档。
   </p>
 
   <p style="margin-top:20px;">

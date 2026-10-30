@@ -1,63 +1,218 @@
-# ===== 班主任学生成绩系统 —— 第2步优化版：模板化 + 现代化样式 =====
-# 用 Flask + Jinja 模板(templates/)渲染页面，样式集中在 base.html
-
+"""班主任学生成绩系统：账号、考试、成绩与导出。"""
 import os
 import re
 import io
 import json
 import base64
 import time
-import random
+import secrets
+import hmac
+import hashlib
 import smtplib
-import sqlite3
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from functools import wraps
 from urllib import request as urlreq
 from email.mime.text import MIMEText
 from email.utils import formataddr
-from flask import (Flask, request, render_template, session,
-                   redirect, send_file, url_for)
+from flask import (Flask, request, render_template, session, redirect,
+                   send_file, url_for, abort, flash, g)
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+from database import transaction, init_database, default_subjects, finite_number
 
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "student-grade-system-secret-2026")
-
-# 启动时读取 ~/.class_manager_env 配置文件（公网服务器上放 Mailjet/SMTP 密钥）
-_env_file = os.path.expanduser("~/.class_manager_env")
-if os.path.exists(_env_file):
-    with open(_env_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
+BASE_DIR = Path(__file__).resolve().parent
+# Load before constructing the application, including SECRET_KEY.
+_env_file = Path(os.environ.get('CLASS_MANAGER_ENV_FILE', '~/.class_manager_env')).expanduser()
+if _env_file.exists():
+    for line in _env_file.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            k, v = line.split('=', 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-# 数据库用绝对路径（基于 app.py 所在目录），换任何运行目录都找得到
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(BASE_DIR, "class.db")
+DB = str(Path(os.environ.get('CLASS_MANAGER_DB', BASE_DIR / 'class.db')).resolve())
+INSTANCE_DIR = Path(os.environ.get('CLASS_MANAGER_INSTANCE', Path(DB).parent / '.instance'))
+BACKUP_DIR = Path(os.environ.get('CLASS_MANAGER_BACKUPS', Path(DB).parent.parent / '.class_manager_backups'))
+PRODUCTION = os.environ.get('CLASS_MANAGER_ENV') == 'production'
+secret = os.environ.get('SECRET_KEY')
+if secret == 'student-grade-system-secret-2026':
+    raise RuntimeError('请更换旧版公开 SECRET_KEY')
+if PRODUCTION and (not secret or len(secret) < 32):
+    raise RuntimeError('生产环境必须配置至少32字符的随机 SECRET_KEY')
+if not secret:
+    INSTANCE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    secret_file = INSTANCE_DIR / 'secret-key'
+    # Atomic replace from a complete private file avoids partially read keys.
+    if not secret_file.exists():
+        candidate = INSTANCE_DIR / ('secret-' + secrets.token_hex(8))
+        with open(os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:
+            output.write(secrets.token_hex(32))
+        try:
+            os.link(candidate, secret_file)
+        except FileExistsError:
+            pass
+        finally:
+            candidate.unlink()
+    secret = secret_file.read_text().strip()
+    if len(secret) < 32:
+        raise RuntimeError('本地会话密钥文件无效')
+
+app = Flask(__name__)
+app.config.update(SECRET_KEY=secret, SESSION_COOKIE_HTTPONLY=True,
+                  SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=PRODUCTION,
+                  PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+                  MAX_CONTENT_LENGTH=1024 * 1024)
+init_database(DB, BACKUP_DIR, INSTANCE_DIR, os.environ.get('ADMIN_INITIAL_PASSWORD'))
 
 
-@app.template_filter("num")
-def num_filter(x):
-    """数字显示：整数不带小数点(150)，小数才保留(88.5)"""
+def database(write=False):
+    return transaction(DB, write=write)
+
+
+@app.template_filter('num')
+def num_filter(value):
     try:
-        x = float(x)
-    except (TypeError, ValueError):
-        return x
-    return int(x) if x.is_integer() else x
-
-def default_subjects():
-    """山东高考模板：返回 (科目, 满分, 及格线)，用于一键生成考试科目配置"""
-    return [(s, 150, 90) for s in ["语文", "数学", "英语"]] + \
-           [(s, 100, 60) for s in ["物理", "化学", "生物"]]
+        number = finite_number(value)
+    except ValueError:
+        return '—'
+    return int(number) if number.is_integer() else number
 
 
-def get_db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+def csrf_token():
+    if 'csrf_token' not in session:
+        session['csrf_token'] = secrets.token_urlsafe(32)
+    return session['csrf_token']
+
+
+app.jinja_env.globals['csrf_token'] = csrf_token
+
+
+@app.before_request
+def check_request():
+    g.user = None
+    if 'uid' in session:
+        with database() as conn:
+            user = conn.execute('SELECT * FROM users WHERE id=? AND active=1', (session['uid'],)).fetchone()
+        if not user or session.get('session_version') != user['session_version']:
+            session.clear()
+        else:
+            g.user = user
+            session['user'] = user['username']
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        actual = request.form.get('csrf_token', '')
+        expected = session.get('csrf_token', '')
+        if not actual or not expected or not hmac.compare_digest(actual.encode(), expected.encode()):
+            abort(400, description='页面已过期或请求无法验证，请刷新页面后重试。')
+    if g.user and g.user['must_change_password'] and request.endpoint not in ('change_password', 'logout', 'static'):
+        return redirect(url_for('change_password'))
+
+
+@app.after_request
+def response_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(404)
+@app.errorhandler(429)
+def request_error(error):
+    return render_template('error.html', code=error.code, message=error.description), error.code
+
+
+@app.errorhandler(500)
+def server_error(error):
+    return render_template('error.html', code=500, message='暂时无法完成操作，请稍后重试。'), 500
+
+
+def login_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not g.user:
+            return redirect(url_for('login'))
+        return fn(*args, **kwargs)
+    return wrapped
+
+
+def admin_required(fn):
+    @wraps(fn)
+    @login_required
+    def wrapped(*args, **kwargs):
+        if g.user['username'] != 'admin':
+            abort(403, description='只有管理员可以执行此操作。')
+        return fn(*args, **kwargs)
+    return wrapped
+
+
+def is_admin():
+    return g.user is not None and g.user['username'] == 'admin'
+
+
+def get_my_student(conn, sid):
+    if is_admin():
+        return conn.execute('SELECT * FROM students WHERE id=?', (sid,)).fetchone()
+    return conn.execute('SELECT * FROM students WHERE id=? AND teacher_id=?', (sid, g.user['id'])).fetchone()
+
+
+def get_my_exam(conn, eid):
+    if is_admin():
+        return conn.execute('SELECT * FROM exams WHERE id=?', (eid,)).fetchone()
+    return conn.execute('SELECT * FROM exams WHERE id=? AND teacher_id=?', (eid, g.user['id'])).fetchone()
+
+
+def require_student(conn, sid):
+    student = get_my_student(conn, sid)
+    if student is None:
+        abort(404, description='没有这个学生，或你没有访问权限。')
+    return student
+
+
+def require_exam(conn, eid):
+    exam = get_my_exam(conn, eid)
+    if exam is None:
+        abort(404, description='没有这场考试，或你没有访问权限。')
+    return exam
+
+
+def own_exams(conn):
+    if is_admin():
+        return conn.execute('SELECT * FROM exams ORDER BY id').fetchall()
+    return conn.execute('SELECT * FROM exams WHERE teacher_id=? ORDER BY id', (g.user['id'],)).fetchall()
+
+
+def consume_limits(limits):
+    """Reserve persistent counters in one transaction, shared by web workers."""
+    now = time.time()
+    with database(write=True) as conn:
+        conn.execute('DELETE FROM rate_limits WHERE started_at<?', (now - 86400,))
+        rows = []
+        for label, value, maximum, window in limits:
+            key = hashlib.sha256((label + ':' + str(value)).encode()).hexdigest()
+            row = conn.execute('SELECT * FROM rate_limits WHERE bucket=?', (key,)).fetchone()
+            count = row['count'] if row and now < row['started_at'] + window else 0
+            if count >= maximum:
+                return False
+            rows.append((key, count + 1, row['started_at'] if count else now))
+        for key, count, started in rows:
+            conn.execute('INSERT INTO rate_limits(bucket,count,started_at) VALUES(?,?,?) ON CONFLICT(bucket) DO UPDATE SET count=excluded.count,started_at=excluded.started_at', (key, count, started))
+    return True
+
+
+def valid_email(value):
+    return bool(len(value) <= 254 and re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', value))
+
+
+def password_error(value):
+    if value == 'admin123':
+        return '不能使用旧版公开默认密码，请设置新的密码'
+    return '密码长度需为8至128位' if not 8 <= len(value) <= 128 else None
 
 
 def send_email(to_addr, subject, body):
@@ -95,7 +250,7 @@ def send_email_via_brevo(to_addr, subject, body):
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json",
                  "api-key": key})
-    with urlreq.urlopen(req) as resp:
+    with urlreq.urlopen(req, timeout=30) as resp:
         return resp.status
 
 
@@ -116,7 +271,7 @@ def send_email_via_mailjet(to_addr, subject, body):
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json",
                  "Authorization": "Basic " + auth})
-    with urlreq.urlopen(req) as resp:
+    with urlreq.urlopen(req, timeout=30) as resp:
         return resp.status
 
 
@@ -134,812 +289,651 @@ def send_email_via_smtp(to_addr, subject, body):
     msg["Subject"] = subject
     msg["From"] = formataddr(("班主任成绩系统", user))   # 发件人显示成名称
     msg["To"] = to_addr
-    with smtplib.SMTP_SSL(host, port) as s:
+    with smtplib.SMTP_SSL(host, port, timeout=30) as s:
         s.login(user, pwd)
         s.sendmail(user, [to_addr], msg.as_string())
 
 
-def get_student_scores(conn, sid):
-    """查某学生全部成绩，并带上考试名、该科满分、及格线（配置来自 exam_subjects）"""
-    return conn.execute(
-        "SELECT s.id, s.subject, s.score, s.exam_id, e.name exam_name, "
-        "es.max_score, es.pass_score FROM scores s "
-        "JOIN exams e ON s.exam_id=e.id "
-        "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
-        "WHERE s.student_id=? ORDER BY s.exam_id, s.subject", (sid,)).fetchall()
-
-
-def login_required(f):
-    """装饰器：没登录就先跳转到登录页，保护需要登录才能访问的页面"""
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if "user" not in session:
-            return redirect("/login")
-        return f(*args, **kwargs)
-    return wrapper
-
-
-def admin_required(f):
-    """装饰器：只有 admin 管理员能访问（用户管理等）"""
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if session.get("user") != "admin":
-            return redirect("/")
-        return f(*args, **kwargs)
-    return wrapper
-
-
-def get_my_student(conn, sid):
-    """查一个学生，但只能查当前老师自己的（admin 不受限）。查不到返回 None。"""
-    uid = session.get("uid")
-    if session.get("user") == "admin":
-        return conn.execute("SELECT * FROM students WHERE id=?", (sid,)).fetchone()
-    return conn.execute("SELECT * FROM students WHERE id=? AND teacher_id=?",
-                        (sid, uid)).fetchone()
-
-
-def get_my_exam(conn, exam_id):
-    """查一场考试，但只能查当前老师自己的（admin 不受限）。"""
-    uid = session.get("uid")
-    if session.get("user") == "admin":
-        return conn.execute("SELECT * FROM exams WHERE id=?", (exam_id,)).fetchone()
-    return conn.execute("SELECT * FROM exams WHERE id=? AND teacher_id=?",
-                        (exam_id, uid)).fetchone()
-
-
-# 启动时建表（若没有）
-conn = get_db()
-conn.execute("CREATE TABLE IF NOT EXISTS students ("
-             "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER)")
-conn.execute("CREATE TABLE IF NOT EXISTS scores ("
-             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-             "student_id INTEGER, exam_id INTEGER, subject TEXT, score REAL, "
-             "FOREIGN KEY(student_id) REFERENCES students(id))")
-conn.execute("CREATE TABLE IF NOT EXISTS exams ("
-             "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER)")
-conn.execute("CREATE TABLE IF NOT EXISTS exam_subjects ("
-             "id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, "
-             "subject TEXT, max_score REAL, pass_score REAL, "
-             "FOREIGN KEY(exam_id) REFERENCES exams(id))")
-conn.execute("CREATE TABLE IF NOT EXISTS users ("
-             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-             "username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, email TEXT)")
-conn.execute("CREATE TABLE IF NOT EXISTS reset_tokens ("
-             "id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, "
-             "token TEXT, expires_at REAL)")
-
-# 旧库迁移：给 students / exams 补 teacher_id 列（已存在的列会报错，忽略即可）
-for _tbl in ("students", "exams"):
-    try:
-        conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN teacher_id INTEGER")
-    except sqlite3.OperationalError:
-        pass  # 列已存在
-# 旧数据全部归到 admin（id=1）
-conn.execute("UPDATE students SET teacher_id=1 WHERE teacher_id IS NULL")
-conn.execute("UPDATE exams SET teacher_id=1 WHERE teacher_id IS NULL")
-
-# 第一次运行没有账号，创建一个默认管理员（密码哈希后存储）
-if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-    conn.execute("INSERT INTO users (username, password) VALUES (?,?)",
-                 ("admin", generate_password_hash("admin123")))
-conn.commit()
-conn.close()
-
-
-# ----- 登录 / 登出 -----
-@app.route("/login", methods=["GET", "POST"])
+@app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
-    info = None
-    if request.args.get("registered"):
-        info = "注册成功，请登录"
-    if request.args.get("reset"):
-        info = "密码已重置，请用新密码登录"
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        conn = get_db()
-        u = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-        conn.close()
-        if u and check_password_hash(u["password"], password):
-            session["user"] = username        # 登录成功，记录到 session
-            session["uid"] = u["id"]         # 记录用户 id，用于数据隔离
-            return redirect("/")
-        error = "用户名或密码错误"
-    return render_template("login.html", error=error, info=info)
+    info = '注册成功，请登录' if request.args.get('registered') else None
+    if request.args.get('reset'):
+        info = '密码已重置，请用新密码登录'
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        if not consume_limits([('login_ip', request.remote_addr, 60, 900), ('login_user', username.casefold(), 10, 900)]):
+            return render_template('login.html', error='尝试次数过多，请15分钟后重试', info=None), 429
+        with database() as conn:
+            user = conn.execute('SELECT * FROM users WHERE username=? AND active=1', (username,)).fetchone()
+        if len(password) <= 128 and user and check_password_hash(user['password'], password):
+            session.clear()
+            session.update(user=user['username'], uid=user['id'], session_version=user['session_version'])
+            session.permanent = True
+            return redirect(url_for('change_password') if user['must_change_password'] else url_for('index'))
+        error = '用户名或密码错误，或账号已停用'
+    return render_template('login.html', error=error, info=info)
 
 
-@app.route("/logout")
+@app.route('/logout', methods=['POST'])
 def logout():
-    session.pop("user", None)
-    return redirect("/login")
+    session.clear()
+    return redirect(url_for('login'))
 
 
-# ----- 公开注册：其他班主任可自行注册账号 -----
-@app.route("/register", methods=["GET", "POST"])
+@app.route('/register', methods=['GET', 'POST'])
 def register():
     error = None
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        confirm = request.form.get("confirm", "")
-        email = request.form.get("email", "").strip()
-        conn = get_db()
-        if not username:
-            error = "用户名不能为空"
-        elif len(password) < 6:
-            error = "密码至少要 6 位"
-        elif password != confirm:
-            error = "两次输入的密码不一致"
-        elif email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-            error = "邮箱格式不正确"
-        elif conn.execute("SELECT 1 FROM users WHERE username=?",
-                          (username,)).fetchone():
-            error = "用户名已被占用，换一个"
-        elif email and conn.execute("SELECT 1 FROM users WHERE email=?",
-                                    (email,)).fetchone():
-            error = "该邮箱已被注册"
-        else:
-            conn.execute("INSERT INTO users (username, password, email) VALUES (?,?,?)",
-                         (username, generate_password_hash(password),
-                          email or None))
-            conn.commit()
-            conn.close()
-            return redirect("/login?registered=1")
-        conn.close()
-    return render_template("register.html", error=error)
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        email = request.form.get('email', '').strip().lower()
+        if not consume_limits([('register_ip', request.remote_addr, 10, 3600)]):
+            abort(429, description='注册过于频繁，请稍后重试。')
+        with database(write=True) as conn:
+            if username.casefold() == 'admin':
+                error = '该用户名为系统保留账号'
+            elif not 1 <= len(username) <= 50:
+                error = '用户名长度需为1至50位'
+            elif password_error(password):
+                error = password_error(password)
+            elif password != request.form.get('confirm', ''):
+                error = '两次输入的密码不一致'
+            elif email and not valid_email(email):
+                error = '邮箱格式不正确'
+            elif conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
+                error = '用户名已被占用，换一个'
+            elif email and conn.execute('SELECT 1 FROM users WHERE lower(email)=?', (email,)).fetchone():
+                error = '该邮箱已被注册'
+            else:
+                conn.execute('INSERT INTO users(username,password,email) VALUES(?,?,?)', (username, generate_password_hash(password), email or None))
+                return redirect('/login?registered=1')
+    return render_template('register.html', error=error)
 
 
-# ----- 忘记密码：输入邮箱 → 发验证码 -----
-@app.route("/forgot_password", methods=["GET", "POST"])
+@app.route('/forgot_password', methods=['GET', 'POST'])
 def forgot_password():
     error = None
-    info = None
-    if request.method == "POST":
-        email = request.form.get("email", "").strip()
-        conn = get_db()
-        u = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        if not u:
-            error = "该邮箱没有注册过账号"
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip().lower()
+        if not valid_email(email):
+            error = '邮箱格式不正确'
+        elif not consume_limits([
+            ('reset_cooldown', email, 1, 60), ('reset_email', email, 5, 3600),
+            ('reset_ip', request.remote_addr, 15, 3600),
+        ]):
+            return render_template('forgot_password.html', error='发送过于频繁，请至少等待一分钟后再试', info=None), 429
         else:
-            token = f"{random.randint(0, 999999):06d}"      # 6位随机验证码
-            expires = time.time() + 600                      # 10分钟有效
-            conn.execute("DELETE FROM reset_tokens WHERE email=?", (email,))
-            conn.execute("INSERT INTO reset_tokens (email, token, expires_at) "
-                         "VALUES (?,?,?)", (email, token, expires))
-            conn.commit()
-            try:
-                send_email(email, "成绩系统 · 密码重置验证码",
-                           f"您正在重置密码，验证码：{token}\n"
-                           f"验证码 10 分钟内有效。若非本人操作，请忽略此邮件。")
-                return redirect(url_for("reset_password", email=email))
-            except Exception as e:
-                error = f"邮件发送失败：{e}"
-        conn.close()
-    return render_template("forgot_password.html", error=error, info=info)
+            token = f'{secrets.randbelow(1000000):06d}'
+            with database(write=True) as conn:
+                conn.execute('DELETE FROM reset_tokens WHERE expires_at<? OR lower(email)=?', (time.time(), email))
+                user = conn.execute('SELECT id FROM users WHERE lower(email)=? AND active=1', (email,)).fetchone()
+                token_id = None
+                if user:
+                    token_id = conn.execute('INSERT INTO reset_tokens(email,token,expires_at,created_at) VALUES(?,?,?,?)', (email, generate_password_hash(token), time.time() + 600, time.time())).lastrowid
+            if token_id is not None:
+                try:
+                    send_email(email, '成绩系统 · 密码重置验证码', f'您正在重置密码，验证码：{token}\n验证码10分钟内有效，最多尝试5次。若非本人操作，请忽略此邮件。')
+                except Exception:
+                    # Do not log provider URLs or bodies containing addresses, keys or codes.
+                    app.logger.error('Password reset email could not be delivered')
+                    with database(write=True) as conn:
+                        conn.execute('DELETE FROM reset_tokens WHERE id=?', (token_id,))
+                    error = '邮件暂时无法发送，请稍后重试或联系管理员'
+                else:
+                    with database(write=True) as conn:
+                        conn.execute('UPDATE reset_tokens SET delivered=1 WHERE id=?', (token_id,))
+            if not error:
+                flash('如果该邮箱已注册且账号可用，验证码将发送到邮箱。请检查收件箱及垃圾箱。')
+                return redirect(url_for('reset_password', email=email))
+    return render_template('forgot_password.html', error=error, info=None)
 
 
-# ----- 重置密码：输入邮箱 + 验证码 + 新密码 -----
-@app.route("/reset_password", methods=["GET", "POST"])
+@app.route('/reset_password', methods=['GET', 'POST'])
 def reset_password():
     error = None
-    if request.method == "POST":
-        email = request.form.get("email", "").strip()
-        token = request.form.get("token", "").strip()
-        new = request.form.get("new_password", "")
-        confirm = request.form.get("confirm", "")
-        conn = get_db()
-        r = conn.execute("SELECT * FROM reset_tokens WHERE email=? "
-                         "ORDER BY id DESC LIMIT 1", (email,)).fetchone()
-        if not r or r["token"] != token:
-            error = "验证码不正确"
-        elif time.time() > r["expires_at"]:
-            error = "验证码已过期，请重新获取"
-        elif len(new) < 6:
-            error = "新密码至少要 6 位"
-        elif new != confirm:
-            error = "两次输入的新密码不一致"
-        else:
-            conn.execute("UPDATE users SET password=? WHERE email=?",
-                         (generate_password_hash(new), email))
-            conn.execute("DELETE FROM reset_tokens WHERE email=?", (email,))
-            conn.commit()
-            conn.close()
-            return redirect("/login?reset=1")
-        conn.close()
-    return render_template("reset_password.html", error=error,
-                           email=request.args.get("email", ""))
+    email = request.values.get('email', '').strip().lower()
+    if request.method == 'POST':
+        if not consume_limits([('reset_verify_ip', request.remote_addr, 30, 900)]):
+            abort(429, description='验证过于频繁，请稍后重试。')
+        token = request.form.get('token', '').strip()
+        new = request.form.get('new_password', '')
+        with database(write=True) as conn:
+            row = conn.execute('SELECT * FROM reset_tokens WHERE email=? ORDER BY id DESC LIMIT 1', (email,)).fetchone()
+            if not row or not row['delivered'] or row['expires_at'] <= time.time() or row['attempts'] >= 5:
+                error = '验证码无效或已过期，请重新获取'
+            elif not re.fullmatch(r'\d{6}', token) or not check_password_hash(row['token'], token):
+                conn.execute('UPDATE reset_tokens SET attempts=attempts+1 WHERE id=?', (row['id'],))
+                error = '验证码不正确，连续错误5次需重新获取'
+            elif password_error(new):
+                error = password_error(new)
+            elif new != request.form.get('confirm', ''):
+                error = '两次输入的新密码不一致'
+            else:
+                # User and token changes are serialized so one code cannot be consumed twice.
+                conn.execute('UPDATE users SET password=?,session_version=session_version+1,must_change_password=0 WHERE lower(email)=? AND active=1', (generate_password_hash(new), email))
+                conn.execute('DELETE FROM reset_tokens WHERE email=?', (email,))
+                session.clear()
+                return redirect('/login?reset=1')
+    return render_template('reset_password.html', error=error, email=email)
 
 
-# ----- 修改自己的密码 -----
-@app.route("/change_password", methods=["GET", "POST"])
+@app.route('/change_password', methods=['GET', 'POST'])
 @login_required
 def change_password():
     error = None
-    info = None
-    if request.method == "POST":
-        old = request.form.get("old_password", "")
-        new = request.form.get("new_password", "")
-        confirm = request.form.get("confirm_password", "")
-        conn = get_db()
-        u = conn.execute("SELECT * FROM users WHERE username=?",
-                         (session["user"],)).fetchone()
-        if not check_password_hash(u["password"], old):
-            error = "旧密码不正确"
-        elif len(new) < 6:
-            error = "新密码至少要 6 位"
-        elif new != confirm:
-            error = "两次输入的新密码不一致"
-        else:
-            conn.execute("UPDATE users SET password=? WHERE id=?",
-                         (generate_password_hash(new), u["id"]))
-            conn.commit()
-            info = "密码修改成功！"
-        conn.close()
-    return render_template("change_password.html", error=error, info=info)
+    info = '为保护账号，请先修改初始密码' if g.user['must_change_password'] else None
+    if request.method == 'POST':
+        new = request.form.get('new_password', '')
+        old = request.form.get('old_password', '')
+        with database(write=True) as conn:
+            user = conn.execute('SELECT * FROM users WHERE id=?', (g.user['id'],)).fetchone()
+            if len(old) > 128 or not check_password_hash(user['password'], old):
+                error = '旧密码不正确'
+            elif password_error(new):
+                error = password_error(new)
+            elif new == old:
+                error = '新密码不能与旧密码相同'
+            elif new != request.form.get('confirm_password', ''):
+                error = '两次输入的新密码不一致'
+            else:
+                conn.execute('UPDATE users SET password=?,session_version=session_version+1,must_change_password=0 WHERE id=?', (generate_password_hash(new), user['id']))
+                session['session_version'] = user['session_version'] + 1
+                flash('密码修改成功，其他设备的登录已失效。')
+                return redirect(url_for('index'))
+    return render_template('change_password.html', error=error, info=info)
 
 
-# ----- 用户管理（仅管理员） -----
-@app.route("/users")
-@login_required
+@app.route('/users')
 @admin_required
 def user_list():
-    conn = get_db()
-    users = conn.execute("SELECT id, username FROM users ORDER BY id").fetchall()
-    conn.close()
-    return render_template("users.html", users=users, error=None)
+    with database() as conn:
+        users = conn.execute('SELECT id,username,active FROM users ORDER BY id').fetchall()
+    return render_template('users.html', users=users, error=None)
 
 
-@app.route("/add_user", methods=["POST"])
-@login_required
+@app.route('/add_user', methods=['POST'])
 @admin_required
 def add_user():
-    username = request.form.get("username", "").strip()
-    password = request.form.get("password", "")
-    conn = get_db()
-    error = None
-    if not username or len(password) < 6:
-        error = "用户名不能为空，密码至少 6 位"
-    elif conn.execute("SELECT 1 FROM users WHERE username=?",
-                      (username,)).fetchone():
-        error = f"用户名 {username} 已存在"
-    else:
-        conn.execute("INSERT INTO users (username, password) VALUES (?,?)",
-                     (username, generate_password_hash(password)))
-        conn.commit()
-    users = conn.execute("SELECT id, username FROM users ORDER BY id").fetchall()
-    conn.close()
-    return render_template("users.html", users=users, error=error)
+    username = request.form.get('username', '').strip()
+    password = request.form.get('password', '')
+    with database(write=True) as conn:
+        if not 1 <= len(username) <= 50 or password_error(password):
+            flash('用户名需为1至50位，密码需为8至128位')
+        elif username.casefold() == 'admin' or conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
+            flash('用户名已存在或为系统保留账号')
+        else:
+            conn.execute('INSERT INTO users(username,password,must_change_password) VALUES(?,?,1)', (username, generate_password_hash(password)))
+            flash('老师账号已创建，首次登录需修改密码。')
+    return redirect(url_for('user_list'))
 
 
-@app.route("/delete_user/<int:uid>", methods=["POST"])
-@login_required
+@app.route('/delete_user/<int:uid>', methods=['POST'])
 @admin_required
 def delete_user(uid):
-    conn = get_db()
-    u = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
-    if u and u["username"] != "admin":      # 不能删除管理员 admin
-        conn.execute("DELETE FROM users WHERE id=?", (uid,))
-        conn.commit()
-    conn.close()
-    return redirect("/users")
+    with database(write=True) as conn:
+        conn.execute("UPDATE users SET active=0,session_version=session_version+1 WHERE id=? AND username!='admin'", (uid,))
+        conn.execute('DELETE FROM reset_tokens WHERE lower(email) IN (SELECT lower(email) FROM users WHERE id=? AND active=0)', (uid,))
+    flash('账号已停用，已有登录已失效，学生与考试数据已保留。')
+    return redirect(url_for('user_list'))
 
 
-# ----- 首页：学生列表（只看自己班的） -----
-@app.route("/")
+@app.route('/enable_user/<int:uid>', methods=['POST'])
+@admin_required
+def enable_user(uid):
+    with database(write=True) as conn:
+        conn.execute("UPDATE users SET active=1,session_version=session_version+1 WHERE id=? AND username!='admin'", (uid,))
+    flash('账号已恢复。')
+    return redirect(url_for('user_list'))
+
+
+@app.route('/')
 @login_required
 def index():
-    conn = get_db()
-    uid = session.get("uid")
-    if session.get("user") == "admin":
-        rows = conn.execute("SELECT * FROM students ORDER BY id").fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM students WHERE teacher_id=? ORDER BY id",
-                            (uid,)).fetchall()
-    conn.close()
-    return render_template("index.html", students=rows)
+    with database() as conn:
+        students = conn.execute('SELECT * FROM students ORDER BY id').fetchall() if is_admin() else conn.execute('SELECT * FROM students WHERE teacher_id=? ORDER BY id', (g.user['id'],)).fetchall()
+    return render_template('index.html', students=students)
 
 
-# ----- 添加学生 -----
-@app.route("/add", methods=["POST"])
+@app.route('/add', methods=['POST'])
 @login_required
 def add_student():
-    name = request.form.get("name", "").strip()
-    if name:
-        conn = get_db()
-        uid = session.get("uid")
-        # 重名检查只在自己班范围内
-        if session.get("user") == "admin":
-            exists = conn.execute("SELECT id FROM students WHERE name=?", (name,)).fetchone()
-        else:
-            exists = conn.execute("SELECT id FROM students WHERE name=? AND teacher_id=?",
-                                  (name, uid)).fetchone()
-        if exists:
-            conn.close()
-            return f'<script>alert("已存在同名学生：{name}"); location.href="/"</script>'
-        conn.execute("INSERT INTO students (name, teacher_id) VALUES (?,?)",
-                     (name, uid if session.get("user") != "admin" else 1))
-        conn.commit()
-        conn.close()
-    return '<script>location.href="/"</script>'
+    name = request.form.get('name', '').strip()
+    if not 1 <= len(name) <= 100:
+        flash('学生姓名长度需为1至100位')
+    else:
+        with database(write=True) as conn:
+            if conn.execute('SELECT 1 FROM students WHERE name=? AND teacher_id=?', (name, g.user['id'])).fetchone():
+                flash(f'已存在同名学生：{name}')
+            else:
+                conn.execute('INSERT INTO students(name,teacher_id) VALUES(?,?)', (name, g.user['id']))
+    return redirect(url_for('index'))
+
+def normalise_score(row):
+    record = dict(row)
+    record.update(valid=False, config_valid=False, fail=False, display='数据异常')
+    try:
+        maximum = finite_number(record.get('max_score'))
+        passing = finite_number(record.get('pass_score'))
+        if maximum <= 0 or not 0 <= passing <= maximum:
+            return record
+        record['config_valid'] = True
+        if record.get('status') == 'absent':
+            record.update(valid=True, display='缺考', score=None)
+            return record
+        score = finite_number(record.get('score'))
+        if record.get('status') != 'recorded' or not 0 <= score <= maximum:
+            return record
+        record.update(valid=True, display=num_filter(score), score=score, fail=score < passing)
+    except ValueError:
+        pass
+    return record
 
 
-# ----- 录入成绩页（GET 显示表单，POST 提交保存） -----
-@app.route("/score/<int:sid>", methods=["GET", "POST"])
+def get_student_scores(conn, sid):
+    # Newest legacy duplicate wins; new writes update that row under a write lock.
+    rows = conn.execute('''SELECT s.*,e.name exam_name,es.max_score,es.pass_score
+        FROM scores s JOIN students st ON st.id=s.student_id
+        JOIN exams e ON e.id=s.exam_id AND e.teacher_id=st.teacher_id
+        LEFT JOIN exam_subjects es ON es.id=(SELECT MAX(cfg.id) FROM exam_subjects cfg WHERE cfg.exam_id=s.exam_id AND cfg.subject=s.subject)
+        WHERE s.student_id=? AND s.id=(SELECT MAX(sc.id) FROM scores sc WHERE sc.student_id=s.student_id AND sc.exam_id=s.exam_id AND sc.subject=s.subject)
+        ORDER BY s.exam_id,s.subject''', (sid,)).fetchall()
+    return [normalise_score(row) for row in rows]
+
+
+def require_pair(student, exam):
+    if student['teacher_id'] != exam['teacher_id']:
+        abort(400, description='学生与考试必须属于同一位老师。')
+
+
+def parse_score(config):
+    status = request.form.get('status', 'recorded')
+    if status == 'absent':
+        return None, status
+    if status != 'recorded':
+        raise ValueError('请选择正常成绩或缺考')
+    maximum = finite_number(config['max_score'])
+    passing = finite_number(config['pass_score'])
+    if maximum <= 0 or not 0 <= passing <= maximum:
+        raise ValueError('科目配置异常，请先修正满分和及格线')
+    score = finite_number(request.form.get('score', '').strip())
+    if not 0 <= score <= maximum:
+        raise ValueError(f'请输入0至{num_filter(maximum)}分之间的成绩')
+    return score, status
+
+
+@app.route('/score/<int:sid>', methods=['GET', 'POST'])
 @login_required
 def score_page(sid):
-    conn = get_db()
-    stu = get_my_student(conn, sid)
-    if not stu:
-        conn.close()
-        return "没有这个学生（或不是你班的）"
-
-    if session.get("user") == "admin":
-        all_exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
-    else:
-        all_exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
-                                 (session.get("uid"),)).fetchall()
-    # 当前选中的考试（URL 或表单）
-    exam_id = request.values.get("exam_id", type=int)
-    if not exam_id and all_exams:
-        exam_id = all_exams[0]["id"]
-    cur_exam = conn.execute("SELECT * FROM exams WHERE id=?",
-                            (exam_id,)).fetchone() if exam_id else None
-    cur_subs = conn.execute(
-        "SELECT subject, max_score, pass_score FROM exam_subjects "
-        "WHERE exam_id=? ORDER BY id", (exam_id,)).fetchall() if exam_id else []
-
     error = None
-    if request.method == "POST":
-        post_exam_id = request.form.get("exam_id", type=int)
-        subject = request.form.get("subject", "").strip()
-        score_raw = request.form.get("score", "").strip()
-        cfgrow = conn.execute(
-            "SELECT max_score, pass_score FROM exam_subjects "
-            "WHERE exam_id=? AND subject=?", (post_exam_id, subject)).fetchone()
-        try:
-            score_val = float(score_raw)
-        except ValueError:
-            error = "成绩必须是数字"
-        else:
-            if not cfgrow:
-                error = "该考试没有配置这个科目，请先到考试管理里添加"
-            elif score_val < 0 or score_val > cfgrow["max_score"]:
-                mx = num_filter(cfgrow["max_score"])
-                error = f"{subject} 满分 {mx} 分，请输入 0 ~ {mx}"
+    with database(write=request.method == 'POST') as conn:
+        student = require_student(conn, sid)
+        exams = [e for e in own_exams(conn) if e['teacher_id'] == student['teacher_id']]
+        eid = request.values.get('exam_id', type=int)
+        if 'exam_id' in request.values and eid is None:
+            abort(400, description='考试编号无效。')
+        if eid is None and exams:
+            eid = exams[0]['id']
+        exam = require_exam(conn, eid) if eid is not None else None
+        if exam:
+            require_pair(student, exam)
+        subs = conn.execute('SELECT * FROM exam_subjects WHERE exam_id=? ORDER BY id', (eid,)).fetchall()
+        if request.method == 'POST':
+            subject = request.form.get('subject', '').strip()
+            config = conn.execute('SELECT * FROM exam_subjects WHERE exam_id=? AND subject=? ORDER BY id DESC LIMIT 1', (eid, subject)).fetchone()
+            try:
+                if not config:
+                    raise ValueError('该考试没有配置此科目，请先添加科目')
+                value, status = parse_score(config)
+            except ValueError as exc:
+                error = str(exc)
             else:
-                # 同一考试同一科目已录过 → 覆盖；否则新增
-                ex = conn.execute(
-                    "SELECT id FROM scores WHERE student_id=? AND exam_id=? AND subject=?",
-                    (sid, post_exam_id, subject)).fetchone()
-                if ex:
-                    conn.execute("UPDATE scores SET score=? WHERE id=?",
-                                 (score_val, ex["id"]))
+                existing = conn.execute('SELECT id FROM scores WHERE student_id=? AND exam_id=? AND subject=? ORDER BY id DESC', (sid, eid, subject)).fetchall()
+                if existing:
+                    conn.execute('UPDATE scores SET score=?,status=? WHERE id=?', (value, status, existing[0]['id']))
+                    conn.execute('DELETE FROM scores WHERE student_id=? AND exam_id=? AND subject=? AND id!=?', (sid, eid, subject, existing[0]['id']))
                 else:
-                    conn.execute(
-                        "INSERT INTO scores (student_id, exam_id, subject, exam, score) "
-                        "VALUES (?,?,?,?,?)",
-                        (sid, post_exam_id, subject,
-                         conn.execute("SELECT name FROM exams WHERE id=?",
-                                      (post_exam_id,)).fetchone()["name"],
-                         score_val))
-                conn.commit()
-        # 表单提交后，页面停在刚操作的考试
-        exam_id = post_exam_id
-        cur_exam = conn.execute("SELECT * FROM exams WHERE id=?",
-                                (exam_id,)).fetchone()
-        cur_subs = conn.execute(
-            "SELECT subject, max_score, pass_score FROM exam_subjects "
-            "WHERE exam_id=? ORDER BY id", (exam_id,)).fetchall()
-
-    rows = get_student_scores(conn, sid)
-    conn.close()
-    return render_template("score.html", stu=stu, rows=rows,
-                           all_exams=all_exams, cur_exam=cur_exam,
-                           cur_subs=cur_subs, error=error)
+                    conn.execute('INSERT INTO scores(student_id,exam_id,subject,score,status,exam) VALUES(?,?,?,?,?,?)', (sid, eid, subject, value, status, exam['name']))
+                flash('成绩已保存。')
+                return redirect(url_for('score_page', sid=sid, exam_id=eid))
+        rows = get_student_scores(conn, sid)
+    return render_template('score.html', stu=student, rows=rows, all_exams=exams, cur_exam=exam, cur_subs=subs, error=error)
 
 
-# ----- 学生详情页：显示各科成绩 + 不及格标红 -----
-@app.route("/student/<int:sid>")
+@app.route('/student/<int:sid>')
 @login_required
 def student_page(sid):
-    conn = get_db()
-    stu = get_my_student(conn, sid)
-    if not stu:
-        conn.close()
-        return "没有这个学生（或不是你班的）"
-    rows = get_student_scores(conn, sid)
-    if session.get("user") == "admin":
-        all_exams = [dict(e) for e in conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()]
-    else:
-        all_exams = [dict(e) for e in conn.execute(
-            "SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
-            (session.get("uid"),)).fetchall()]
-
-    # 折线图：科目 -> {考试id: 分数}
+    with database() as conn:
+        student = require_student(conn, sid)
+        rows = get_student_scores(conn, sid)
+        exams = [dict(e) for e in own_exams(conn) if e['teacher_id'] == student['teacher_id']]
     chart = {}
-    for r in rows:
-        chart.setdefault(r["subject"], {})[str(r["exam_id"])] = r["score"]
+    for row in rows:
+        if row['valid'] and row['status'] == 'recorded':
+            chart.setdefault(row['subject'], {})[str(row['exam_id'])] = round(row['score'] / row['max_score'] * 100, 2)
+    return render_template('student.html', stu=student, rows=rows, all_exams=exams, chart=chart,
+                           print_date=datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d'))
 
-    conn.close()
-    return render_template("student.html", stu=stu, rows=rows,
-                           all_exams=all_exams, chart=chart)
 
-
-@app.route("/help")
+@app.route('/help')
 @login_required
 def help_page():
-    return render_template("help.html")
+    return render_template('help.html')
 
 
-# ===== 考试管理：自定义考试名称 + 每场考试的科目/满分/及格线 =====
-
-@app.route("/exams")
+@app.route('/exams')
 @login_required
 def exam_list():
-    conn = get_db()
-    uid = session.get("uid")
-    if session.get("user") == "admin":
-        exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
-    else:
-        exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
-                            (uid,)).fetchall()
-    # 每场考试录了多少条成绩
-    counts = {}
-    for r in conn.execute("SELECT exam_id, COUNT(*) c FROM scores GROUP BY exam_id"):
-        counts[r["exam_id"]] = r["c"]
-    conn.close()
-    return render_template("exams.html", exams=exams, counts=counts, error=None)
+    with database() as conn:
+        exams = own_exams(conn)
+        counts = {e['id']: conn.execute('SELECT COUNT(*) FROM scores WHERE exam_id=?', (e['id'],)).fetchone()[0] for e in exams}
+    return render_template('exams.html', exams=exams, counts=counts, error=None)
 
 
-@app.route("/create_exam", methods=["POST"])
+@app.route('/create_exam', methods=['POST'])
 @login_required
 def create_exam():
-    name = request.form.get("name", "").strip()
-    conn = get_db()
-    error = None
-    uid = session.get("uid")
-    if not name:
-        error = "考试名称不能为空"
-    elif session.get("user") == "admin":
-        if conn.execute("SELECT 1 FROM exams WHERE name=?", (name,)).fetchone():
-            error = f"已存在考试：{name}"
-    else:
-        if conn.execute("SELECT 1 FROM exams WHERE name=? AND teacher_id=?",
-                        (name, uid)).fetchone():
-            error = f"已存在考试：{name}"
-    if error is None:
-        exam_id = conn.execute("INSERT INTO exams (name, teacher_id) VALUES (?,?)",
-                               (name, uid if session.get("user") != "admin" else 1)
-                               ).lastrowid
-        # 新考试自动按山东高考模板生成科目，省得手动一个个加
-        for subj, mx, ps in default_subjects():
-            conn.execute("INSERT INTO exam_subjects (exam_id,subject,max_score,pass_score) "
-                         "VALUES (?,?,?,?)", (exam_id, subj, mx, ps))
-        conn.commit()
-        conn.close()
-        return redirect(f"/exam/{exam_id}")
-    if session.get("user") == "admin":
-        exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
-    else:
-        exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
-                            (uid,)).fetchall()
-    counts = {}
-    for r in conn.execute("SELECT exam_id, COUNT(*) c FROM scores GROUP BY exam_id"):
-        counts[r["exam_id"]] = r["c"]
-    conn.close()
-    return render_template("exams.html", exams=exams, counts=counts, error=error)
+    name = request.form.get('name', '').strip()
+    with database(write=True) as conn:
+        if not 1 <= len(name) <= 100:
+            flash('考试名称长度需为1至100位')
+        elif conn.execute('SELECT 1 FROM exams WHERE teacher_id=? AND name=?', (g.user['id'], name)).fetchone():
+            flash('已存在同名考试')
+        else:
+            eid = conn.execute('INSERT INTO exams(name,teacher_id) VALUES(?,?)', (name, g.user['id'])).lastrowid
+            conn.executemany('INSERT INTO exam_subjects(exam_id,subject,max_score,pass_score) VALUES(?,?,?,?)', [(eid, subject, maximum, passing) for subject, maximum, passing in default_subjects()])
+            return redirect(url_for('exam_config', exam_id=eid))
+    return redirect(url_for('exam_list'))
 
 
-@app.route("/delete_exam/<int:exam_id>", methods=["POST"])
+@app.route('/delete_exam/<int:exam_id>', methods=['POST'])
 @login_required
 def delete_exam(exam_id):
-    conn = get_db()
-    if get_my_exam(conn, exam_id):
-        conn.execute("DELETE FROM exam_subjects WHERE exam_id=?", (exam_id,))
-        conn.execute("DELETE FROM scores WHERE exam_id=?", (exam_id,))
-        conn.execute("DELETE FROM exams WHERE id=?", (exam_id,))
-        conn.commit()
-    conn.close()
-    return redirect("/exams")
+    with database(write=True) as conn:
+        require_exam(conn, exam_id)
+        conn.execute('DELETE FROM scores WHERE exam_id=?', (exam_id,))
+        conn.execute('DELETE FROM exam_subjects WHERE exam_id=?', (exam_id,))
+        conn.execute('DELETE FROM exams WHERE id=?', (exam_id,))
+    return redirect(url_for('exam_list'))
 
 
-@app.route("/exam/<int:exam_id>")
+@app.route('/exam/<int:exam_id>')
 @login_required
 def exam_config(exam_id):
-    conn = get_db()
-    exam = get_my_exam(conn, exam_id)
-    if not exam:
-        conn.close()
-        return "没有这场考试（或不是你的）"
-    subs = conn.execute("SELECT * FROM exam_subjects WHERE exam_id=? ORDER BY id",
-                        (exam_id,)).fetchall()
-    conn.close()
-    return render_template("exam_config.html", exam=exam, subs=subs, error=None)
+    with database() as conn:
+        exam = require_exam(conn, exam_id)
+        subs = conn.execute('SELECT * FROM exam_subjects WHERE exam_id=? ORDER BY id', (exam_id,)).fetchall()
+    return render_template('exam_config.html', exam=exam, subs=subs, error=None)
 
 
-@app.route("/exam/<int:exam_id>/add_subject", methods=["POST"])
+def parse_subject():
+    maximum = finite_number(request.form.get('max_score', ''))
+    raw = request.form.get('pass_score', '').strip()
+    passing = finite_number(raw) if raw else maximum * .6
+    if maximum <= 0 or not 0 <= passing <= maximum:
+        raise ValueError('满分必须大于0，及格线需在0至满分之间')
+    return maximum, passing
+
+
+@app.route('/exam/<int:exam_id>/add_subject', methods=['POST'])
 @login_required
 def add_subject(exam_id):
-    subject = request.form.get("subject", "").strip()
-    max_s = request.form.get("max_score", "").strip()
-    pass_s = request.form.get("pass_score", "").strip()
-    conn = get_db()
-    exam = get_my_exam(conn, exam_id)
-    if not exam:
-        conn.close()
-        return "没有这场考试（或不是你的）"
-    error = None
-    try:
-        max_s = float(max_s)
-        pass_s = float(pass_s) if pass_s else max_s * 0.6
-    except ValueError:
-        error = "满分和及格线必须是数字"
-    else:
-        if not subject:
-            error = "科目名不能为空"
-        elif max_s <= 0 or pass_s < 0 or pass_s > max_s:
-            error = "满分要大于0，及格线要在 0 ~ 满分 之间"
-        elif conn.execute("SELECT 1 FROM exam_subjects WHERE exam_id=? AND subject=?",
-                          (exam_id, subject)).fetchone():
-            error = f"该考试已有科目：{subject}"
-        else:
-            conn.execute("INSERT INTO exam_subjects (exam_id,subject,max_score,pass_score) "
-                         "VALUES (?,?,?,?)", (exam_id, subject, max_s, pass_s))
-            conn.commit()
-    exam = conn.execute("SELECT * FROM exams WHERE id=?", (exam_id,)).fetchone()
-    subs = conn.execute("SELECT * FROM exam_subjects WHERE exam_id=? ORDER BY id",
-                        (exam_id,)).fetchall()
-    conn.close()
-    return render_template("exam_config.html", exam=exam, subs=subs, error=error)
+    with database(write=True) as conn:
+        require_exam(conn, exam_id)
+        try:
+            subject = request.form.get('subject', '').strip()
+            maximum, passing = parse_subject()
+            if not 1 <= len(subject) <= 50:
+                raise ValueError('科目名称长度需为1至50位')
+            if conn.execute('SELECT 1 FROM exam_subjects WHERE exam_id=? AND subject=?', (exam_id, subject)).fetchone():
+                raise ValueError('该考试已有此科目')
+            conn.execute('INSERT INTO exam_subjects(exam_id,subject,max_score,pass_score) VALUES(?,?,?,?)', (exam_id, subject, maximum, passing))
+        except ValueError as exc:
+            flash(str(exc))
+    return redirect(url_for('exam_config', exam_id=exam_id))
 
 
-@app.route("/exam/<int:exam_id>/update_subject/<int:cfg_id>", methods=["POST"])
+@app.route('/exam/<int:exam_id>/update_subject/<int:cfg_id>', methods=['POST'])
 @login_required
 def update_subject(exam_id, cfg_id):
-    max_s = request.form.get("max_score", "").strip()
-    pass_s = request.form.get("pass_score", "").strip()
-    conn = get_db()
-    exam = get_my_exam(conn, exam_id)
-    if not exam:
-        conn.close()
-        return "没有这场考试（或不是你的）"
-    error = None
-    try:
-        max_s = float(max_s)
-        pass_s = float(pass_s)
-    except ValueError:
-        error = "满分和及格线必须是数字"
-    else:
-        if max_s <= 0 or pass_s < 0 or pass_s > max_s:
-            error = "满分要大于0，及格线要在 0 ~ 满分 之间"
-        else:
-            conn.execute("UPDATE exam_subjects SET max_score=?, pass_score=? WHERE id=?",
-                         (max_s, pass_s, cfg_id))
-            conn.commit()
-    exam = conn.execute("SELECT * FROM exams WHERE id=?", (exam_id,)).fetchone()
-    subs = conn.execute("SELECT * FROM exam_subjects WHERE exam_id=? ORDER BY id",
-                        (exam_id,)).fetchall()
-    conn.close()
-    return render_template("exam_config.html", exam=exam, subs=subs, error=error)
+    with database(write=True) as conn:
+        require_exam(conn, exam_id)
+        config = conn.execute('SELECT * FROM exam_subjects WHERE id=? AND exam_id=?', (cfg_id, exam_id)).fetchone()
+        if not config:
+            abort(404, description='该科目不属于这场考试。')
+        try:
+            maximum, passing = parse_subject()
+            scores = conn.execute("SELECT score FROM scores WHERE exam_id=? AND subject=? AND status='recorded'", (exam_id, config['subject'])).fetchall()
+            for row in scores:
+                try:
+                    existing = finite_number(row['score'])
+                except ValueError:
+                    continue
+                if existing > maximum:
+                    raise ValueError(f'已有成绩为{num_filter(existing)}分，不能将满分下调到{num_filter(maximum)}分，请先修正相关成绩')
+            conn.execute('UPDATE exam_subjects SET max_score=?,pass_score=? WHERE id=? AND exam_id=?', (maximum, passing, cfg_id, exam_id))
+        except ValueError as exc:
+            flash(str(exc))
+    return redirect(url_for('exam_config', exam_id=exam_id))
 
 
-@app.route("/exam/<int:exam_id>/delete_subject/<int:cfg_id>", methods=["POST"])
+@app.route('/exam/<int:exam_id>/delete_subject/<int:cfg_id>', methods=['POST'])
 @login_required
 def delete_subject(exam_id, cfg_id):
-    subj = request.form.get("subject", "")
-    conn = get_db()
-    if not get_my_exam(conn, exam_id):
-        conn.close()
-        return "没有这场考试（或不是你的）"
-    conn.execute("DELETE FROM exam_subjects WHERE id=?", (cfg_id,))
-    conn.execute("DELETE FROM scores WHERE exam_id=? AND subject=?",
-                 (exam_id, subj))
-    conn.commit()
-    conn.close()
-    return redirect(f"/exam/{exam_id}")
+    with database(write=True) as conn:
+        require_exam(conn, exam_id)
+        config = conn.execute('SELECT * FROM exam_subjects WHERE id=? AND exam_id=?', (cfg_id, exam_id)).fetchone()
+        if not config:
+            abort(404, description='该科目不属于这场考试。')
+        # Derive subject from the verified row, never from the request body.
+        conn.execute('DELETE FROM scores WHERE exam_id=? AND subject=?', (exam_id, config['subject']))
+        conn.execute('DELETE FROM exam_subjects WHERE exam_id=? AND subject=?', (exam_id, config['subject']))
+    return redirect(url_for('exam_config', exam_id=exam_id))
 
 
-@app.route("/exam/<int:exam_id>/apply_template", methods=["POST"])
+@app.route('/exam/<int:exam_id>/apply_template', methods=['POST'])
 @login_required
 def apply_template(exam_id):
-    """一键补齐/重置为山东高考模板：缺的科目补上，已有科目不覆盖"""
-    conn = get_db()
-    if not get_my_exam(conn, exam_id):
-        conn.close()
-        return "没有这场考试（或不是你的）"
-    for subj, mx, ps in default_subjects():
-        if not conn.execute("SELECT 1 FROM exam_subjects WHERE exam_id=? AND subject=?",
-                            (exam_id, subj)).fetchone():
-            conn.execute("INSERT INTO exam_subjects (exam_id,subject,max_score,pass_score) "
-                         "VALUES (?,?,?,?)", (exam_id, subj, mx, ps))
-    conn.commit()
-    conn.close()
-    return redirect(f"/exam/{exam_id}")
+    with database(write=True) as conn:
+        require_exam(conn, exam_id)
+        for subject, maximum, passing in default_subjects():
+            if not conn.execute('SELECT 1 FROM exam_subjects WHERE exam_id=? AND subject=?', (exam_id, subject)).fetchone():
+                conn.execute('INSERT INTO exam_subjects(exam_id,subject,max_score,pass_score) VALUES(?,?,?,?)', (exam_id, subject, maximum, passing))
+    return redirect(url_for('exam_config', exam_id=exam_id))
 
 
-# ----- 全班汇总：按某场考试排名 + 不及格名单（只看自己班） -----
-@app.route("/summary")
+def build_summary(conn, exam):
+    """Missing/absent/invalid scores do not participate in complete-score ranking."""
+    from decimal import Decimal
+    subjects = conn.execute('SELECT * FROM exam_subjects WHERE exam_id=? ORDER BY id', (exam['id'],)).fetchall()
+    # Preserve legacy duplicates in storage, but count each subject only once.
+    configs = {row['subject']: row for row in subjects}
+    subjects = list(configs.values())
+    students = conn.execute('SELECT * FROM students WHERE teacher_id=? ORDER BY id', (exam['teacher_id'],)).fetchall()
+    rows = conn.execute('''SELECT s.*,es.max_score,es.pass_score FROM scores s JOIN students st ON st.id=s.student_id
+        LEFT JOIN exam_subjects es ON es.id=(SELECT MAX(id) FROM exam_subjects WHERE exam_id=s.exam_id AND subject=s.subject)
+        WHERE s.exam_id=? AND st.teacher_id=? AND s.id=(SELECT MAX(sc.id) FROM scores sc WHERE sc.student_id=s.student_id AND sc.exam_id=s.exam_id AND sc.subject=s.subject)''', (exam['id'], exam['teacher_id'])).fetchall()
+    score_map = {(r['student_id'], r['subject']): normalise_score(r) for r in rows}
+    ranking, incomplete, fails = [], [], []
+    for student in students:
+        total = Decimal('0')
+        count = absent = invalid = fail_count = 0
+        for subject in configs:
+            row = score_map.get((student['id'], subject))
+            if row is None:
+                continue
+            if not row['valid']:
+                invalid += 1
+            elif row['status'] == 'absent':
+                absent += 1
+            else:
+                total += Decimal(str(row['score']))
+                count += 1
+                if row['fail']:
+                    fail_count += 1
+                    fails.append(dict(name=student['name'], subject=subject, score=row['score'], pass_score=row['pass_score']))
+        result = dict(sid=student['id'], name=student['name'], total=float(total), avg=round(float(total) / count, 2) if count else None,
+                      count=count, absent=absent, invalid=invalid, missing=len(configs)-count-absent-invalid, fail_count=fail_count,
+                      complete=bool(configs) and count == len(configs), sort_total=total)
+        (ranking if result['complete'] else incomplete).append(result)
+    ranking.sort(key=lambda item: (-item['sort_total'], item['sid']))
+    previous = None
+    for pos, row in enumerate(ranking, start=1):
+        row['rank'] = previous['rank'] if previous and row['sort_total'] == previous['sort_total'] else pos
+        previous = row
+    statistics = []
+    for config in subjects:
+        present = [score_map.get((s['id'], config['subject'])) for s in students]
+        valid = [r for r in present if r and r['valid'] and r['status'] == 'recorded']
+        values = [r['score'] for r in valid]
+        passing = sum(not r['fail'] for r in valid)
+        excellent = sum(r['score'] >= r['max_score'] * .85 for r in valid)
+        statistics.append(dict(subject=config['subject'], count=len(values), expected=len(students), absent=sum(bool(r and r['valid'] and r['status'] == 'absent') for r in present),
+                               average=round(sum(values)/len(values), 2) if values else None, maximum=max(values) if values else None, minimum=min(values) if values else None,
+                               pass_rate=round(passing/len(values)*100, 1) if values else None, excellent_rate=round(excellent/len(values)*100, 1) if values else None))
+    return dict(ranking=ranking, incomplete=incomplete, fails=fails, statistics=statistics, subjects=subjects,
+                score_map=score_map, students=students, has_scores=any(r['count'] for r in ranking+incomplete),
+                all_complete=bool(students) and not incomplete)
+
+
+@app.route('/summary')
 @login_required
 def summary():
-    conn = get_db()
-    uid = session.get("uid")
-    if session.get("user") == "admin":
-        all_exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
-    else:
-        all_exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
-                                 (uid,)).fetchall()
-    exam_id = request.args.get("exam_id", type=int)
-    if not exam_id and all_exams:
-        exam_id = all_exams[0]["id"]
-    exam = get_my_exam(conn, exam_id) if exam_id else None
-    if session.get("user") == "admin":
-        rows = conn.execute(
-            "SELECT st.id sid, st.name, s.subject, s.score, es.max_score, es.pass_score "
-            "FROM scores s JOIN students st ON s.student_id=st.id "
-            "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
-            "WHERE s.exam_id=? ORDER BY st.id", (exam_id,)).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT st.id sid, st.name, s.subject, s.score, es.max_score, es.pass_score "
-            "FROM scores s JOIN students st ON s.student_id=st.id "
-            "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
-            "WHERE s.exam_id=? AND st.teacher_id=? ORDER BY st.id",
-            (exam_id, uid)).fetchall()
-    conn.close()
-
-    # 按学生分组，算总分、平均分、不及格科数（及格线读 exam_subjects）
-    stu_map = {}
-    fails = []
-    for r in rows:
-        d = stu_map.setdefault(r["sid"], {"name": r["name"], "total": 0,
-                                          "count": 0, "fail_count": 0})
-        d["total"] += r["score"]
-        d["count"] += 1
-        if r["score"] < r["pass_score"]:
-            d["fail_count"] += 1
-            fails.append({"name": r["name"], "subject": r["subject"],
-                          "score": r["score"], "pass_score": r["pass_score"]})
-
-    ranking = []
-    for sid, d in stu_map.items():
-        ranking.append({"sid": sid, "name": d["name"], "total": round(d["total"], 1),
-                        "avg": round(d["total"] / d["count"], 1),
-                        "count": d["count"], "fail_count": d["fail_count"]})
-    ranking.sort(key=lambda x: x["avg"], reverse=True)   # 按平均分降序
-
-    return render_template("summary.html", exam=exam, all_exams=all_exams,
-                           ranking=ranking, fails=fails)
+    with database() as conn:
+        exams = own_exams(conn)
+        eid = request.args.get('exam_id', type=int)
+        if 'exam_id' in request.args and eid is None:
+            abort(400, description='考试编号无效。')
+        if eid is None and exams:
+            eid = exams[0]['id']
+        exam = require_exam(conn, eid) if eid is not None else None
+        data = build_summary(conn, exam) if exam else dict(ranking=[], incomplete=[], fails=[], statistics=[], has_scores=False, all_complete=False)
+    return render_template('summary.html', exam=exam, all_exams=exams, **data)
 
 
-# ----- 删除学生（连带删除他的成绩） -----
-@app.route("/delete/<int:sid>", methods=["POST"])
+@app.route('/delete/<int:sid>', methods=['POST'])
 @login_required
 def delete_student(sid):
-    conn = get_db()
-    if get_my_student(conn, sid):
-        conn.execute("DELETE FROM scores WHERE student_id=?", (sid,))   # 先删他的成绩
-        conn.execute("DELETE FROM students WHERE id=?", (sid,))          # 再删学生本人
-        conn.commit()
-    conn.close()
-    return '<script>location.href="/"</script>'
+    with database(write=True) as conn:
+        require_student(conn, sid)
+        conn.execute('DELETE FROM scores WHERE student_id=?', (sid,))
+        conn.execute('DELETE FROM students WHERE id=?', (sid,))
+    return redirect(url_for('index'))
 
 
-# ----- 修改一条成绩 -----
-@app.route("/edit_score/<int:score_id>", methods=["GET", "POST"])
+def require_score(conn, score_id):
+    row = conn.execute('''SELECT s.*,st.name,st.teacher_id,e.name exam_name,es.max_score,es.pass_score FROM scores s
+        JOIN students st ON st.id=s.student_id JOIN exams e ON e.id=s.exam_id
+        LEFT JOIN exam_subjects es ON es.id=(SELECT MAX(id) FROM exam_subjects WHERE exam_id=s.exam_id AND subject=s.subject)
+        WHERE s.id=?''', (score_id,)).fetchone()
+    if not row:
+        abort(404, description='没有这条成绩。')
+    student = require_student(conn, row['student_id'])
+    exam = require_exam(conn, row['exam_id'])
+    require_pair(student, exam)
+    return normalise_score(row)
+
+
+@app.route('/edit_score/<int:score_id>', methods=['GET', 'POST'])
 @login_required
 def edit_score(score_id):
-    conn = get_db()
-    r = conn.execute(
-        "SELECT s.id, s.subject, s.score, s.student_id, s.exam_id, st.name, "
-        "st.teacher_id, e.name exam_name, es.max_score, es.pass_score "
-        "FROM scores s JOIN students st ON s.student_id=st.id "
-        "JOIN exams e ON s.exam_id=e.id "
-        "LEFT JOIN exam_subjects es ON es.exam_id=s.exam_id AND es.subject=s.subject "
-        "WHERE s.id=?", (score_id,)).fetchone()
-    if not r:
-        conn.close()
-        return "没有这条成绩"
-    # 归属检查：非 admin 只能改自己班学生的成绩
-    if session.get("user") != "admin" and r["teacher_id"] != session.get("uid"):
-        conn.close()
-        return "不能修改其他老师的成绩"
-
     error = None
-    if request.method == "POST":
-        score_val = request.form.get("score", "").strip()
-        try:
-            score_val = float(score_val)
-        except ValueError:
-            error = "成绩必须是数字"
-        else:
-            if score_val < 0 or score_val > r["max_score"]:
-                mx = num_filter(r["max_score"])
-                error = f"{r['subject']} 满分 {mx} 分，请输入 0 ~ {mx}"
+    with database(write=request.method == 'POST') as conn:
+        row = require_score(conn, score_id)
+        if request.method == 'POST':
+            try:
+                if not row['config_valid']:
+                    raise ValueError('此科目配置缺失或异常，请先到考试管理补齐配置，或删除此条异常成绩')
+                value, status = parse_score(row)
+            except ValueError as exc:
+                error = str(exc)
             else:
-                conn.execute("UPDATE scores SET score=? WHERE id=?", (score_val, score_id))
-                conn.commit()
-                conn.close()
-                return (f'<script>location.href="/score/{r["student_id"]}'
-                        f'?exam_id={r["exam_id"]}"</script>')
-    conn.close()
-    return render_template("edit_score.html", rec=r, error=error)
+                conn.execute('UPDATE scores SET score=?,status=? WHERE id=?', (value, status, score_id))
+                return redirect(url_for('score_page', sid=row['student_id'], exam_id=row['exam_id']))
+    return render_template('edit_score.html', rec=row, error=error)
 
 
-# ----- 导出全班成绩为 Excel -----
-@app.route("/export_excel")
+@app.route('/delete_score/<int:score_id>', methods=['POST'])
+@login_required
+def delete_score(score_id):
+    with database(write=True) as conn:
+        row = require_score(conn, score_id)
+        conn.execute('DELETE FROM scores WHERE student_id=? AND exam_id=? AND subject=?', (row['student_id'], row['exam_id'], row['subject']))
+    flash('该科成绩已删除，现在为未录入状态。')
+    return redirect(url_for('score_page', sid=row['student_id'], exam_id=row['exam_id']))
+
+
+def sheet_title(name, used):
+    name = re.sub(r'[\\/*?:\[\]\x00-\x1f]', '_', name).strip().strip("'") or '考试'
+    base = name[:31]
+    title = base
+    suffix = 1
+    while title.casefold() in used:
+        suffix += 1
+        tag = f' ({suffix})'
+        title = base[:31-len(tag)] + tag
+    used.add(title.casefold())
+    return title
+
+
+def excel_value(cell, value):
+    # All user strings must remain text even if they begin with '='.
+    if isinstance(value, str):
+        value = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', value)
+        cell.value = value
+        cell.data_type = 's'
+    else:
+        cell.value = value
+
+
+@app.route('/export_excel')
 @login_required
 def export_excel():
-    conn = get_db()
-    uid = session.get("uid")
-    is_admin = session.get("user") == "admin"
-    # 只查自己的考试
-    if is_admin:
-        exams = conn.execute("SELECT id, name FROM exams ORDER BY id").fetchall()
-        students = conn.execute("SELECT id, name FROM students ORDER BY id").fetchall()
-    else:
-        exams = conn.execute("SELECT id, name FROM exams WHERE teacher_id=? ORDER BY id",
-                             (uid,)).fetchall()
-        students = conn.execute("SELECT id, name FROM students WHERE teacher_id=? ORDER BY id",
-                                (uid,)).fetchall()
-    # 所有成绩：key=(student_id, exam_id, subject) -> (score, pass_score)
-    score_map = {}
-    for r in conn.execute(
-        "SELECT s.student_id, s.exam_id, s.subject, s.score, es.pass_score "
-        "FROM scores s LEFT JOIN exam_subjects es "
-        "ON es.exam_id=s.exam_id AND es.subject=s.subject"
-    ):
-        score_map[(r["student_id"], r["exam_id"], r["subject"])] = (r["score"], r["pass_score"])
-    conn.close()
-
-    SUBJECTS = ["语文", "数学", "英语", "物理", "化学", "生物"]
-
     wb = Workbook()
-    wb.remove(wb.active)  # 删除默认空表
-
-    head_fill = PatternFill("solid", fgColor="1E3A8A")
-    red_fill = PatternFill("solid", fgColor="FECACA")
-
-    for exam in exams:
-        ws = wb.create_sheet(title=exam["name"][:31])
-        # 表头
-        headers = ["姓名"] + SUBJECTS
-        ws.append(headers)
-        for c in ws[1]:
-            c.fill = head_fill
-            c.font = Font(color="FFFFFF", bold=True)
-            c.alignment = Alignment(horizontal="center")
-        # 每个学生一行
-        for stu in students:
-            row = [stu["name"]]
-            for subj in SUBJECTS:
-                info = score_map.get((stu["id"], exam["id"], subj))
-                row.append(info[0] if info else "")
-            ws.append(row)
-            # 不及格标红
-            for col_idx, subj in enumerate(SUBJECTS, start=2):
-                info = score_map.get((stu["id"], exam["id"], subj))
-                if info and info[1] is not None and info[0] < info[1]:
-                    ws.cell(row=ws.max_row, column=col_idx).fill = red_fill
-                    ws.cell(row=ws.max_row, column=col_idx).font = Font(color="DC2626", bold=True)
-        # 列宽
-        ws.column_dimensions["A"].width = 12
-        for i in range(2, 8):
-            ws.column_dimensions[chr(64 + i)].width = 8
-
-    if not exams:
-        ws = wb.create_sheet(title="全班成绩")
-        ws.append(["暂无考试数据"])
-
+    wb.remove(wb.active)
+    used = set()
+    head_fill = PatternFill('solid', fgColor='1E3A8A')
+    red_fill = PatternFill('solid', fgColor='FECACA')
+    with database() as conn:
+        for exam in own_exams(conn):
+            data = build_summary(conn, exam)
+            ws = wb.create_sheet(sheet_title(exam['name'], used))
+            headers = ['姓名'] + [s['subject'] for s in data['subjects']] + ['总分', '名次', '录入状态']
+            for col, value in enumerate(headers, 1):
+                cell = ws.cell(1, col)
+                excel_value(cell, value)
+                cell.fill = head_fill
+                cell.font = Font(color='FFFFFF', bold=True)
+                cell.alignment = Alignment(horizontal='center')
+            results = {r['sid']: r for r in data['ranking']+data['incomplete']}
+            for idx, student in enumerate(data['students'], 2):
+                excel_value(ws.cell(idx, 1), student['name'])
+                for col, config in enumerate(data['subjects'], 2):
+                    row = data['score_map'].get((student['id'], config['subject']))
+                    value = '未录入' if row is None else row['score'] if row['valid'] and row['status']=='recorded' else row['display']
+                    cell = ws.cell(idx, col)
+                    excel_value(cell, value)
+                    if row and row['fail']:
+                        cell.fill = red_fill
+                        cell.font = Font(color='DC2626', bold=True)
+                result = results[student['id']]
+                start = len(data['subjects']) + 2
+                excel_value(ws.cell(idx, start), result['total'] if result['count'] else None)
+                excel_value(ws.cell(idx, start+1), result.get('rank'))
+                excel_value(ws.cell(idx, start+2), '已录全' if result['complete'] else f"未录入{result['missing']}科 / 缺考{result['absent']}科 / 异常{result['invalid']}科")
+            ws.freeze_panes = 'B2'
+            ws.auto_filter.ref = ws.dimensions
+            for col in range(1, len(headers)+1):
+                ws.column_dimensions[get_column_letter(col)].width = 16 if col==1 else 12
+            ws.column_dimensions[get_column_letter(len(headers))].width = 40
+    if not wb.worksheets:
+        wb.create_sheet('全班成绩').append(['暂无考试数据'])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    return send_file(
-        buf, as_attachment=True, download_name="全班成绩.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument."
-                 "spreadsheetml.sheet")
+    return send_file(buf, as_attachment=True, download_name='全班成绩.xlsx', mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))   # 云平台会通过 PORT 环境变量指定端口
-    app.run(host="0.0.0.0", port=port, debug=False)
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=int(os.environ.get('PORT', 8080)), debug=False)

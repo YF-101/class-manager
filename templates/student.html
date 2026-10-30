@@ -9,32 +9,37 @@
             style="padding:5px 12px; font-size:12px; margin-left:8px;">🖨️ 打印成绩单</button>
   </p>
 
+  <p class="print-date">成绩单日期：{{ print_date }}</p>
   {% if chart %}
   <div style="margin-bottom:18px;">
-    <canvas id="trend" height="100"></canvas>
+    <p style="font-size:13px">各科得分率趋势（%）</p><canvas id="trend" height="100"></canvas><p id="chart-fallback" hidden>图表暂时无法加载，完整成绩见下表。</p>
   </div>
   {% endif %}
 
   {% if rows %}
-  <table>
+  <div class="table-scroll"><table>
     <thead>
-      <tr><th>考试</th><th>科目</th><th>分数</th><th>状态</th><th>操作</th></tr>
+      <tr><th>考试</th><th>科目</th><th>分数</th><th>状态</th><th class="no-print">操作</th></tr>
     </thead>
     <tbody>
       {% for r in rows %}
       <tr>
         <td>{{ r.exam_name }}</td>
         <td>{{ r.subject }}</td>
-        <td class="{% if r.score < r.pass_score %}fail{% endif %}">{{ r.score | num }}</td>
+        <td class="{% if r.fail %}fail{% endif %}">{{ r.display }}</td>
         <td>
-          {% if r.score < r.pass_score %}<span class="badge badge-fail">⚠️ 不及格</span>
+          {% if not r.valid %}<span class="badge badge-fail">数据异常，请修正配置或成绩</span>
+          {% elif r.status == "absent" %}<span class="badge">缺考</span>
+          {% elif r.fail %}<span class="badge badge-fail">⚠️ 不及格</span>
           {% else %}<span class="badge badge-ok">✅ 及格</span>{% endif %}
         </td>
-        <td><a href="/edit_score/{{ r.id }}">✏️ 修改</a></td>
+        <td class="no-print"><a href="/edit_score/{{ r.id }}">✏️ 修改</a>
+          <form action="/delete_score/{{ r.id }}" method="post" style="display:inline" onsubmit="return confirm('确定删除这条成绩吗？');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-delete">删除</button></form></td>
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
   {% else %}
   <p class="muted">还没有成绩</p>
   {% endif %}
@@ -55,18 +60,20 @@ const datasets = Object.keys(chart).map((sub, i) => ({
   borderColor: colors[i % colors.length],
   backgroundColor: colors[i % colors.length],
   tension: 0.3,
-  spanGaps: true,
+  spanGaps: false,
   pointRadius: 5
 }));
+if (typeof Chart !== 'undefined') {
 new Chart(document.getElementById('trend'), {
   type: 'line',
   data: { labels: exams.map(e => e.name), datasets },
   options: {
     responsive: true,
-    scales: { y: { min: 0 } },
+    scales: { y: { min: 0, max: 100, title: { display:true, text:"得分率（%）" } } },
     plugins: { legend: { position: 'top' } }
   }
 });
+} else { document.getElementById('chart-fallback').hidden = false; }
 </script>
 {% endif %}
 {% endblock %}

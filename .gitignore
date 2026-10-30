@@ -18,3 +18,11 @@ class.db
 .venv/
 venv/
 reg.txt
+
+# Local secrets, database backups and SQLite auxiliary files
+.instance/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+.class_manager_backups/

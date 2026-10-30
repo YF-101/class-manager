@@ -1,76 +1,42 @@
 {% extends "base.html" %}
 {% block content %}
-
 <div class="card">
   <h2>📊 全班成绩汇总</h2>
-  <p style="margin-bottom:12px; font-size:14px;">
-    选择考试：
-    {% for e in all_exams %}
-      {% if exam and e.id == exam.id %}
-        <strong style="color:#3b82f6;">{{ e.name }}</strong>
-      {% else %}
-        <a href="/summary?exam_id={{ e.id }}">{{ e.name }}</a>
-      {% endif %}
-      {% if not loop.last %} ｜ {% endif %}
-    {% endfor %}
-  </p>
-  <p style="font-size:13px;"><a href="/">← 返回名单</a></p>
+  <p>选择考试：{% for e in all_exams %}<a href="/summary?exam_id={{ e.id }}">{{ e.name }}</a> {% if not loop.last %}｜{% endif %}{% else %}还没有考试，<a href="/exams">去创建</a>{% endfor %}</p>
 </div>
-
+{% if exam %}
 <div class="card">
-  <h2>🏆 「{{ exam.name }}」排名（按平均分）</h2>
-  {% if ranking %}
-  <table>
-    <thead>
-      <tr><th>名次</th><th>学生</th><th>总分</th><th>平均分</th><th>科目数</th><th>不及格科数</th></tr>
-    </thead>
-    <tbody>
-      {% for r in ranking %}
-      <tr>
-        <td>
-          {% if loop.index == 1 %}🥇
-          {% elif loop.index == 2 %}🥈
-          {% elif loop.index == 3 %}🥉
-          {% else %}{{ loop.index }}{% endif %}
-        </td>
-        <td><a href="/student/{{ r.sid }}">{{ r.name }}</a></td>
-        <td>{{ r.total | num }}</td>
-        <td class="{% if r.fail_count > 0 %}fail{% endif %}">{{ r.avg | num }}</td>
-        <td>{{ r.count }}</td>
-        <td>
-          {% if r.fail_count > 0 %}<span class="badge badge-fail">{{ r.fail_count }} 科</span>
-          {% else %}<span class="badge badge-ok">0</span>{% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">这场考试还没有成绩，先去录入</p>
-  {% endif %}
+  <h2>🏆 「{{ exam.name }}」总分排名</h2>
+  <p style="margin-bottom:12px">仅所有科目均录入正常成绩的学生参加排名；同分并列，后续名次跳位。未录入、缺考及异常成绩单独列出。</p>
+  {% if ranking %}<div class="table-scroll"><table>
+    <thead><tr><th>名次</th><th>学生</th><th>总分</th><th>平均分</th><th>科目数</th><th>不及格科数</th></tr></thead>
+    <tbody>{% for r in ranking %}<tr><td>{{ r.rank }}</td><td><a href="/student/{{ r.sid }}">{{ r.name }}</a></td><td>{{ r.total | num }}</td><td>{{ r.avg | num }}</td><td>{{ r.count }}</td><td>{{ r.fail_count }}</td></tr>{% endfor %}</tbody>
+  </table></div>{% else %}<p class="muted">尚无录全所有科目的学生，暂不排名。</p>{% endif %}
 </div>
-
+{% if incomplete %}<div class="card">
+  <h2>待完成或缺考名单（不参加排名）</h2>
+  <div class="table-scroll"><table>
+    <thead><tr><th>学生</th><th>已录科目</th><th>未录入</th><th>缺考</th><th>异常</th><th>已录总分</th></tr></thead>
+    <tbody>{% for r in incomplete %}<tr><td><a href="/score/{{ r.sid }}?exam_id={{ exam.id }}">{{ r.name }}</a></td><td>{{ r.count }}</td><td>{{ r.missing }}</td><td>{{ r.absent }}</td><td>{{ r.invalid }}</td><td>{{ r.total | num if r.count else '—' }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+</div>{% endif %}
 <div class="card">
-  <h2>⚠️ 「{{ exam.name }}」不及格名单</h2>
-  {% if fails %}
-  <table>
-    <thead>
-      <tr><th>学生</th><th>科目</th><th>成绩</th><th>及格线</th></tr>
-    </thead>
-    <tbody>
-      {% for f in fails %}
-      <tr>
-        <td>{{ f.name }}</td>
-        <td>{{ f.subject }}</td>
-        <td class="fail">{{ f.score | num }}</td>
-        <td>{{ f.pass_score | num }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted" style="color:#16a34a;">🎉 这场考试没有不及格的，全员及格！</p>
-  {% endif %}
+  <h2>各科统计</h2>
+  <p style="margin-bottom:12px">平均分、及格率与优秀率仅统计有效的正常成绩；优秀线为满分的85%。缺考、未录入和异常不计入分母。</p>
+  <div class="table-scroll"><table>
+    <thead><tr><th>科目</th><th>有效/应录人数</th><th>缺考</th><th>平均分</th><th>最高分</th><th>最低分</th><th>及格率</th><th>优秀率</th></tr></thead>
+    <tbody>{% for s in statistics %}<tr><td>{{ s.subject }}</td><td>{{ s.count }}/{{ s.expected }}</td><td>{{ s.absent }}</td><td>{{ s.average | num }}</td><td>{{ s.maximum | num }}</td><td>{{ s.minimum | num }}</td><td>{{ (s.pass_rate | num) ~ '%' if s.pass_rate is not none else '—' }}</td><td>{{ (s.excellent_rate | num) ~ '%' if s.excellent_rate is not none else '—' }}</td></tr>{% endfor %}</tbody>
+  </table></div>
 </div>
-
+<div class="card">
+  <h2>⚠️ 不及格名单</h2>
+  {% if fails %}<div class="table-scroll"><table>
+    <thead><tr><th>学生</th><th>科目</th><th>成绩</th><th>及格线</th></tr></thead>
+    <tbody>{% for f in fails %}<tr><td>{{ f.name }}</td><td>{{ f.subject }}</td><td class="fail">{{ f.score | num }}</td><td>{{ f.pass_score | num }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% elif not has_scores %}<p class="muted">尚无有效正常成绩，暂不能判断及格情况。</p>
+  {% elif not all_complete %}<p>已录入的有效成绩中没有不及格；仍有未录入、缺考或异常，暂不能判断全员及格。</p>
+  {% else %}<p>🎉 成绩已录全，全员及格！</p>{% endif %}
+</div>
+{% endif %}
 {% endblock %}

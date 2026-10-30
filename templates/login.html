@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="zh">
 <head>
+<link rel="icon" href="data:,">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · 班主任学生成绩系统</title>
@@ -63,14 +64,16 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
   <div class="info">✅ {{ info }}</div>
   {% endif %}
 
+  {% include "messages.html" %}
   <form action="/login" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="field">
       <label>用户名</label>
-      <input name="username" placeholder="请输入用户名" autofocus>
+      <input autocomplete="username" name="username" placeholder="请输入用户名" autofocus>
     </div>
     <div class="field">
       <label>密码</label>
-      <input type="password" name="password" placeholder="请输入密码">
+      <input autocomplete="current-password" type="password" name="password" placeholder="请输入密码">
     </div>
     <button class="btn">登 录</button>
   </form>
@@ -80,7 +83,7 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
     <span style="color:#d1d5db;">　|　</span>
     <a href="/forgot_password">🔑 忘记密码？</a>
   </p>
-  <p class="hint">默认账号：admin　密码：admin123</p>
+
 </div>
 </body>
 </html>
