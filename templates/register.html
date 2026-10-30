@@ -63,8 +63,8 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
       <input autocomplete="username" name="username" placeholder="给自己起个用户名" autofocus>
     </div>
     <div class="field">
-      <label>邮箱（选填，用于找回密码）</label>
-      <input name="email" placeholder="如 123456@qq.com">
+      <label>邮箱（用于登录和找回密码）</label>
+      <input autocomplete="email" type="email" name="email" placeholder="如 123456@qq.com" required>
     </div>
     <div class="field">
       <label>密码</label>

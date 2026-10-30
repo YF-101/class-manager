@@ -301,18 +301,23 @@ def login():
     if request.args.get('reset'):
         info = '密码已重置，请用新密码登录'
     if request.method == 'POST':
-        username = request.form.get('username', '').strip()
+        identifier = request.form.get('email', request.form.get('username', '')).strip().lower()
         password = request.form.get('password', '')
-        if not consume_limits([('login_ip', request.remote_addr, 60, 900), ('login_user', username.casefold(), 10, 900)]):
+        if not consume_limits([('login_ip', request.remote_addr, 60, 900), ('login_user', identifier.casefold(), 10, 900)]):
             return render_template('login.html', error='尝试次数过多，请15分钟后重试', info=None), 429
         with database() as conn:
-            user = conn.execute('SELECT * FROM users WHERE username=? AND active=1', (username,)).fetchone()
+            user = conn.execute('SELECT * FROM users WHERE lower(email)=? AND active=1', (identifier,)).fetchone()
+            if not user:
+                # Existing accounts without an email remain accessible until one is added.
+                user = conn.execute('SELECT * FROM users WHERE username=? AND (email IS NULL OR email="") AND active=1', (identifier,)).fetchone()
         if len(password) <= 128 and user and check_password_hash(user['password'], password):
             session.clear()
             session.update(user=user['username'], uid=user['id'], session_version=user['session_version'])
             session.permanent = True
+            if not user['email']:
+                flash('该账号尚未登记邮箱。目前可继续用用户名登录；请联系管理员补充邮箱。')
             return redirect(url_for('change_password') if user['must_change_password'] else url_for('index'))
-        error = '用户名或密码错误，或账号已停用'
+        error = '邮箱或密码错误，或账号已停用'
     return render_template('login.html', error=error, info=info)
 
 
@@ -340,14 +345,14 @@ def register():
                 error = password_error(password)
             elif password != request.form.get('confirm', ''):
                 error = '两次输入的密码不一致'
-            elif email and not valid_email(email):
+            elif not valid_email(email):
                 error = '邮箱格式不正确'
             elif conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
                 error = '用户名已被占用，换一个'
             elif email and conn.execute('SELECT 1 FROM users WHERE lower(email)=?', (email,)).fetchone():
                 error = '该邮箱已被注册'
             else:
-                conn.execute('INSERT INTO users(username,password,email) VALUES(?,?,?)', (username, generate_password_hash(password), email or None))
+                conn.execute('INSERT INTO users(username,password,email) VALUES(?,?,?)', (username, generate_password_hash(password), email))
                 return redirect('/login?registered=1')
     return render_template('register.html', error=error)
 
@@ -449,7 +454,7 @@ def change_password():
 @admin_required
 def user_list():
     with database() as conn:
-        users = conn.execute('SELECT id,username,active FROM users ORDER BY id').fetchall()
+        users = conn.execute('SELECT id,username,email,active FROM users ORDER BY id').fetchall()
     return render_template('users.html', users=users, error=None)
 
 
@@ -458,13 +463,16 @@ def user_list():
 def add_user():
     username = request.form.get('username', '').strip()
     password = request.form.get('password', '')
+    email = request.form.get('email', '').strip().lower()
     with database(write=True) as conn:
-        if not 1 <= len(username) <= 50 or password_error(password):
-            flash('用户名需为1至50位，密码需为8至128位')
+        if not 1 <= len(username) <= 50 or password_error(password) or not valid_email(email):
+            flash('用户名需为1至50位，邮箱格式正确，密码需为8至128位')
         elif username.casefold() == 'admin' or conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
             flash('用户名已存在或为系统保留账号')
+        elif conn.execute('SELECT 1 FROM users WHERE lower(email)=?', (email,)).fetchone():
+            flash('该邮箱已被其他账号使用')
         else:
-            conn.execute('INSERT INTO users(username,password,must_change_password) VALUES(?,?,1)', (username, generate_password_hash(password)))
+            conn.execute('INSERT INTO users(username,password,email,must_change_password) VALUES(?,?,?,1)', (username, generate_password_hash(password), email))
             flash('老师账号已创建，首次登录需修改密码。')
     return redirect(url_for('user_list'))
 

@@ -66,7 +66,8 @@ class SiteTests(unittest.TestCase):
     def client(self, name=None, password='TeacherPass123!'):
         client = site.app.test_client()
         if name:
-            response = self.post(client, '/login', {'username':name,'password':password})
+            user = self.sql('SELECT email FROM users WHERE username=?', (name,))[0]
+            response = self.post(client, '/login', {'email':user['email'] or name,'password':password})
             self.assertEqual(response.status_code,302)
         return client
 
@@ -298,13 +299,29 @@ class SiteTests(unittest.TestCase):
         self.assertIn('该邮箱已被注册',self.post(c,'/register',{**data,'username':'other','email':'new@example.invalid'}).text)
         self.assertIn('密码长度',self.post(c,'/register',{**data,'password':'1'}).text)
 
+    def test_email_login_and_legacy_username_fallback(self):
+        c=self.client()
+        response=self.post(c,'/login',{'email':'TEACHER_A@example.invalid','password':'TeacherPass123!'})
+        self.assertEqual(response.status_code,302)
+        self.sql("UPDATE users SET email=NULL WHERE username='teacher_b'")
+        legacy=self.client()
+        response=self.post(legacy,'/login',{'email':'teacher_b','password':'TeacherPass123!'})
+        self.assertEqual(response.status_code,302)
+        self.assertIn('尚未登记邮箱',legacy.get('/').text)
+
     def test_admin_created_user_forced_to_change_password(self):
-        self.post(self.admin,'/add_user',{'username':'new_teacher','password':'InitialPass123!'})
+        self.post(self.admin,'/add_user',{'username':'new_teacher','email':'new@example.invalid','password':'InitialPass123!'})
         c=self.client('new_teacher','InitialPass123!')
         self.assertEqual(c.get('/').location,'/change_password')
         self.assertEqual(c.get('/export_excel').location,'/change_password')
         self.post(c,'/change_password',{'old_password':'InitialPass123!','new_password':'ChangedPass123!','confirm_password':'ChangedPass123!'})
         self.assertEqual(c.get('/').status_code,200)
+
+    def test_admin_created_user_requires_unique_email(self):
+        self.post(self.admin,'/add_user',{'username':'new_teacher','password':'InitialPass123!'})
+        self.assertFalse(self.sql("SELECT 1 FROM users WHERE username='new_teacher'"))
+        self.post(self.admin,'/add_user',{'username':'new_teacher','email':'teacher_a@example.invalid','password':'InitialPass123!'})
+        self.assertFalse(self.sql("SELECT 1 FROM users WHERE username='new_teacher'"))
 
     def test_cascade_student_exam_and_template_idempotent(self):
         self.save();self.post(self.a,f'/exam/{self.ea}/apply_template')
@@ -381,9 +398,11 @@ class MigrationTests(unittest.TestCase):
         conn=sqlite3.connect(self.db);conn.execute('DELETE FROM exam_subjects');conn.execute('UPDATE scores SET score=NULL');conn.execute('UPDATE users SET password=?',(generate_password_hash('LegacyPass123!'),));conn.commit();conn.close()
         self.migrate();old=site.DB;site.DB=str(self.db)
         try:
-            c=site.app.test_client();c.get('/login')
-            with c.session_transaction() as s:token=s['csrf_token']
-            c.post('/login',data={'username':'admin','password':'LegacyPass123!','csrf_token':token})
+            c=site.app.test_client()
+            with site.database() as db:
+                user=db.execute("SELECT id,session_version FROM users WHERE username='admin'").fetchone()
+            with c.session_transaction() as s:
+                s.update(user='admin',uid=user['id'],session_version=user['session_version'],permanent=True)
             for path in ['/student/10','/score/10','/edit_score/30','/summary','/export_excel']:
                 self.assertEqual(c.get(path).status_code,200,path)
             self.assertIn('数据异常',c.get('/student/10').text)

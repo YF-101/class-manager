@@ -68,8 +68,8 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
   <form action="/login" method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="field">
-      <label>用户名</label>
-      <input autocomplete="username" name="username" placeholder="请输入用户名" autofocus>
+      <label>邮箱</label>
+      <input autocomplete="username" type="email" name="email" placeholder="请输入注册邮箱" autofocus>
     </div>
     <div class="field">
       <label>密码</label>
@@ -77,6 +77,7 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
     </div>
     <button class="btn">登 录</button>
   </form>
+  <p class="hint">尚未登记邮箱的旧账号，可暂时使用用户名登录并联系管理员补充邮箱。</p>
 
   <p class="links">
     <a href="/register">📝 注册新账号</a>
