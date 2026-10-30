@@ -543,15 +543,20 @@ def index():
 @login_required
 def add_student():
     name = request.form.get('name', '').strip()
+    student_code = request.form.get('student_code', '').strip()
     if not 1 <= len(name) <= 100:
         flash('学生姓名长度需为1至100位')
+    elif len(student_code) > 50:
+        flash('学号长度不能超过50位')
     else:
         with database(write=True) as conn:
             cur_class = requested_class(conn, request.form.get('class_id'))
             if conn.execute('SELECT 1 FROM students WHERE name=? AND class_id=?', (name, cur_class['id'])).fetchone():
                 flash(f'已存在同名学生：{name}')
+            elif student_code and conn.execute('SELECT 1 FROM students WHERE student_code=? AND class_id=?', (student_code, cur_class['id'])).fetchone():
+                flash(f'该班级已有学号：{student_code}')
             else:
-                conn.execute('INSERT INTO students(name,teacher_id,class_id) VALUES(?,?,?)', (name, cur_class['teacher_id'], cur_class['id']))
+                conn.execute('INSERT INTO students(name,teacher_id,class_id,student_code) VALUES(?,?,?,?)', (name, cur_class['teacher_id'], cur_class['id'], student_code or None))
     return redirect(url_for('index', class_id=request.form.get('class_id') or ''))
 
 

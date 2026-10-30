@@ -14,6 +14,7 @@
   <form action="/add" method="post" style="display:flex; gap:10px;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="class_id" value="{{ cur_class.id }}">
+    <input name="student_code" placeholder="学号（可选）" style="width:150px;">
     <input name="name" placeholder="输入学生姓名" style="flex:1;">
     <button class="btn btn-green">添加学生</button>
   </form>
@@ -25,7 +26,7 @@
   <ul class="student-list">
     {% for s in students %}
     <li>
-      <span class="name">{{ s.name }}</span>
+      <span class="name">{% if s.student_code %}<span class="muted">{{ s.student_code }}</span> · {% endif %}{{ s.name }}</span>
       <span class="links">
         <a href="/score/{{ s.id }}">✏️ 录成绩</a>
         <a href="/student/{{ s.id }}">📊 看成绩</a>

@@ -321,6 +321,14 @@ class SiteTests(unittest.TestCase):
         self.assertIn('二班期中',self.a.get(f'/exams?class_id={second}').text)
         self.assertNotIn('二班期中',self.a.get('/exams').text)
 
+    def test_student_code_unique_within_class(self):
+        self.assertEqual(self.post(self.a,'/add',{'name':'学号学生','student_code':'A001'}).status_code,302)
+        self.post(self.a,'/add',{'name':'重复学号','student_code':'A001'})
+        self.assertEqual(len(self.sql("SELECT id FROM students WHERE class_id=? AND student_code='A001'", (self.sql("SELECT id FROM classes WHERE teacher_id=(SELECT id FROM users WHERE username='teacher_a') ORDER BY id LIMIT 1")[0][0],))),1)
+        self.post(self.a,'/create_class',{'name':'学号测试二班'})
+        cid=self.sql("SELECT id FROM classes WHERE name='学号测试二班'")[0][0]
+        self.assertEqual(self.post(self.a,'/add',{'name':'另一班学生','student_code':'A001','class_id':cid}).status_code,302)
+
     def test_admin_created_user_forced_to_change_password(self):
         self.post(self.admin,'/add_user',{'username':'new_teacher','email':'new@example.invalid','password':'InitialPass123!'})
         c=self.client('new_teacher','InitialPass123!')

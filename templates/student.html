@@ -2,7 +2,7 @@
 {% block content %}
 
 <div class="card">
-  <h2>📊 {{ stu.name }} 的成绩</h2>
+  <h2>📊 {% if stu.student_code %}{{ stu.student_code }} · {% endif %}{{ stu.name }} 的成绩</h2>
   <p style="margin-bottom:12px; font-size:13px;" class="no-print">
     <a href="/score/{{ stu.id }}">✏️ 继续录成绩</a> ｜ <a href="/">← 返回名单</a>
     <button onclick="window.print()" class="btn btn-blue"

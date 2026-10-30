@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def connect(path):
@@ -78,7 +78,7 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
         definitions = [
             'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, email TEXT)',
             'CREATE TABLE IF NOT EXISTS classes (id INTEGER PRIMARY KEY AUTOINCREMENT, teacher_id INTEGER NOT NULL, name TEXT NOT NULL, grade TEXT, school_year TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL DEFAULT 0, UNIQUE(teacher_id,name))',
-            'CREATE TABLE IF NOT EXISTS students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER, class_id INTEGER)',
+            'CREATE TABLE IF NOT EXISTS students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER, class_id INTEGER, student_code TEXT)',
             'CREATE TABLE IF NOT EXISTS exams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER, class_id INTEGER)',
             'CREATE TABLE IF NOT EXISTS exam_subjects (id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, subject TEXT, max_score REAL, pass_score REAL, FOREIGN KEY(exam_id) REFERENCES exams(id))',
             'CREATE TABLE IF NOT EXISTS scores (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id INTEGER, exam_id INTEGER, subject TEXT, score REAL, exam TEXT, FOREIGN KEY(student_id) REFERENCES students(id))',
@@ -88,7 +88,7 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             conn.execute(statement)
         additions = {
             'users': {'email': 'TEXT', 'active': 'INTEGER NOT NULL DEFAULT 1', 'session_version': 'INTEGER NOT NULL DEFAULT 1', 'must_change_password': 'INTEGER NOT NULL DEFAULT 0'},
-            'students': {'teacher_id': 'INTEGER', 'class_id': 'INTEGER'},
+            'students': {'teacher_id': 'INTEGER', 'class_id': 'INTEGER', 'student_code': 'TEXT'},
             'exams': {'teacher_id': 'INTEGER', 'class_id': 'INTEGER'},
             'scores': {'exam_id': 'INTEGER', 'exam': 'TEXT', 'status': "TEXT NOT NULL DEFAULT 'recorded'"},
             'reset_tokens': {'attempts': 'INTEGER NOT NULL DEFAULT 0', 'created_at': 'REAL NOT NULL DEFAULT 0', 'delivered': 'INTEGER NOT NULL DEFAULT 0'},
@@ -160,6 +160,7 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             ('exams_owner', 'exams', 'teacher_id'),
             ('classes_owner', 'classes', 'teacher_id'),
             ('students_class', 'students', 'class_id'),
+            ('students_code', 'students', 'class_id,student_code'),
             ('exams_class', 'exams', 'class_id'),
         ]:
             conn.execute(f'CREATE INDEX IF NOT EXISTS {name} ON {table}({cols})')
