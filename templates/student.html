@@ -51,7 +51,7 @@
     </tbody>
   </table></div>
   {% else %}
-  <p class="muted">还没有成绩</p>
+  <p class="muted">{% if student_view %}暂无已发布成绩，请等待老师发布。{% else %}还没有成绩{% endif %}</p>
   {% endif %}
 </div>
 

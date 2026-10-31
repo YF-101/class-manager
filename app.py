@@ -825,8 +825,8 @@ def get_student_scores(conn, sid):
         FROM scores s JOIN students st ON st.id=s.student_id
         JOIN exams e ON e.id=s.exam_id AND e.teacher_id=st.teacher_id
         LEFT JOIN exam_subjects es ON es.id=(SELECT MAX(cfg.id) FROM exam_subjects cfg WHERE cfg.exam_id=s.exam_id AND cfg.subject=s.subject)
-        WHERE s.student_id=? AND s.id=(SELECT MAX(sc.id) FROM scores sc WHERE sc.student_id=s.student_id AND sc.exam_id=s.exam_id AND sc.subject=s.subject)
-        ORDER BY s.exam_id,s.subject''', (sid,)).fetchall()
+        WHERE s.student_id=? AND (?=0 OR e.published=1) AND s.id=(SELECT MAX(sc.id) FROM scores sc WHERE sc.student_id=s.student_id AND sc.exam_id=s.exam_id AND sc.subject=s.subject)
+        ORDER BY s.exam_id,s.subject''', (sid, int(g.user['role'] in ('student','parent')))).fetchall()
     return [normalise_score(row) for row in rows]
 
 
@@ -837,9 +837,9 @@ def exam_students(conn, exam):
 
 
 def student_exams(conn, student):
-    return conn.execute('''SELECT * FROM exams e WHERE teacher_id=? AND (class_id=?
+    return conn.execute('''SELECT * FROM exams e WHERE teacher_id=? AND (?=0 OR published=1) AND (class_id=?
         OR EXISTS (SELECT 1 FROM scores s WHERE s.exam_id=e.id AND s.student_id=?))
-        ORDER BY id''', (student['teacher_id'], student['class_id'], student['id'])).fetchall()
+        ORDER BY id''', (student['teacher_id'], int(g.user['role'] in ('student','parent')), student['class_id'], student['id'])).fetchall()
 
 
 def require_pair(conn, student, exam):
@@ -1049,10 +1049,23 @@ def create_exam():
         elif conn.execute('SELECT 1 FROM exams WHERE class_id=? AND name=?', (cur_class['id'], name)).fetchone():
             flash('已存在同名考试')
         else:
-            eid = conn.execute('INSERT INTO exams(name,teacher_id,class_id) VALUES(?,?,?)', (name, cur_class['teacher_id'], cur_class['id'])).lastrowid
+            eid = conn.execute('INSERT INTO exams(name,teacher_id,class_id,published) VALUES(?,?,?,0)', (name, cur_class['teacher_id'], cur_class['id'])).lastrowid
             conn.executemany('INSERT INTO exam_subjects(exam_id,subject,max_score,pass_score) VALUES(?,?,?,?)', [(eid, subject, maximum, passing) for subject, maximum, passing in default_subjects()])
             return redirect(url_for('exam_config', exam_id=eid))
     return redirect(url_for('exam_list', class_id=request.form.get('class_id') or ''))
+
+
+@app.route('/exam/<int:exam_id>/publication', methods=['POST'])
+@login_required
+def exam_publication(exam_id):
+    value = request.form.get('published')
+    if value not in ('0','1'):
+        abort(400, description='发布状态无效。')
+    with database(write=True) as conn:
+        exam = require_exam(conn, exam_id)
+        conn.execute('UPDATE exams SET published=? WHERE id=?', (int(value),exam_id))
+    flash('成绩已发布，学生和家长现在可以查看。' if value == '1' else '已撤回发布，学生和家长暂时无法查看该场考试。')
+    return redirect(url_for('exam_list', class_id=exam['class_id']))
 
 
 @app.route('/delete_exam/<int:exam_id>', methods=['POST'])

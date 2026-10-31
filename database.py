@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def connect(path):
@@ -85,9 +85,12 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             if conn.execute('SELECT version FROM schema_meta').fetchone()[0] == SCHEMA_VERSION:
                 conn.rollback()
                 return
-        if version == 5:
+        if version in (5, 6):
             # Only add associations: preserve accounts, hashes, sessions and reset tokens.
-            init_parent_links(conn)
+            if version == 5:
+                init_parent_links(conn)
+            if 'published' not in {r['name'] for r in conn.execute('PRAGMA table_info(exams)')}:
+                conn.execute('ALTER TABLE exams ADD COLUMN published INTEGER NOT NULL DEFAULT 1')
             conn.execute('UPDATE schema_meta SET version=?', (SCHEMA_VERSION,))
             conn.commit()
             return
@@ -193,6 +196,8 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
                   OR (NEW.status='absent' AND NEW.score IS NOT NULL)
                 BEGIN SELECT RAISE(ABORT, 'invalid score'); END''')
         init_parent_links(conn)
+        if 'published' not in {r['name'] for r in conn.execute('PRAGMA table_info(exams)')}:
+            conn.execute('ALTER TABLE exams ADD COLUMN published INTEGER NOT NULL DEFAULT 1')
         conn.execute('CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL)')
         conn.execute('DELETE FROM schema_meta')
         conn.execute('INSERT INTO schema_meta VALUES(?)', (SCHEMA_VERSION,))

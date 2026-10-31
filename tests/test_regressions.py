@@ -47,6 +47,7 @@ class SiteTests(unittest.TestCase):
         self.post(self.a, '/create_exam', {'name':'期中考试'})
         self.post(self.b, '/create_exam', {'name':'期中考试'})
         self.ea,self.eb = [r['id'] for r in self.sql('SELECT id FROM exams ORDER BY id')]
+        self.sql('UPDATE exams SET published=1')
         self.ca = self.sql("SELECT id FROM exam_subjects WHERE exam_id=? AND subject='语文'", (self.ea,))[0][0]
         self.cb = self.sql("SELECT id FROM exam_subjects WHERE exam_id=? AND subject='语文'", (self.eb,))[0][0]
 
@@ -715,6 +716,30 @@ class SiteTests(unittest.TestCase):
         self.post(self.a, f'/student/{self.s2}/parent-account', {'email':'new-parent@example.invalid'})
         self.assertFalse(self.sql("SELECT 1 FROM users WHERE email='new-parent@example.invalid'"))
 
+    def test_publication_filters_family_rows_and_chart_and_can_retract(self):
+        uid,parent = self.make_multi_parent()
+        self.save(score=88)
+        self.sql('UPDATE exams SET published=0 WHERE id=?', (self.ea,))
+        page = parent.get(f'/student/{self.sa}')
+        self.assertNotIn('期中考试', page.text)
+        self.assertNotIn('const chart', page.text)
+        self.assertIn('暂无已发布成绩', page.text)
+        self.assertIn('期中考试', self.a.get(f'/student/{self.sa}').text)
+        self.assertEqual(self.post(self.b, f'/exam/{self.ea}/publication', {'published':'1'}).status_code,404)
+        self.assertEqual(self.post(parent, f'/exam/{self.ea}/publication', {'published':'1'}).status_code,403)
+        self.assertEqual(self.a.post(f'/exam/{self.ea}/publication',data={'published':'1'}).status_code,400)
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/publication', {'published':'bad'}).status_code,400)
+        self.post(self.a, f'/exam/{self.ea}/publication', {'published':'1'})
+        self.assertIn('期中考试',parent.get(f'/student/{self.sa}').text)
+        self.assertIn('88',parent.get(f'/student/{self.sa}').text)
+        self.post(self.admin, f'/exam/{self.ea}/publication', {'published':'0'})
+        self.assertNotIn('期中考试',parent.get(f'/student/{self.sa}').text)
+        self.assertEqual(self.sql('SELECT score FROM scores')[0][0],88)
+
+    def test_publication_new_exams_are_drafts(self):
+        self.post(self.a,'/create_exam',{'name':'新考试待发布'})
+        self.assertEqual(self.sql("SELECT published FROM exams WHERE name='新考试待发布'")[0][0],0)
+
     def test_parent_accounts_see_only_bound_student(self):
         self.save(score=88)
         self.post(self.a, f'/student/{self.sa}/parent-account',
@@ -744,6 +769,7 @@ class SiteTests(unittest.TestCase):
         self.post(self.a, '/create_exam', {'name':'转入班级待考','class_id':new_class})
         self.post(self.a, f'/edit_student/{self.sa}',
                   {'name':'学生甲','class_id':new_class})
+        self.sql('UPDATE exams SET published=1')
         for role, endpoint in [('student', 'account'), ('parent', 'parent-account')]:
             with self.subTest(role=role):
                 self.post(self.a, f'/student/{self.sa}/{endpoint}',
@@ -876,6 +902,21 @@ class MigrationTests(unittest.TestCase):
         conn.commit();conn.close()
     def migrate(self):init_database(self.db,self.root/'backups',self.root/'instance','InitialPass123!')
 
+    def test_publication_v6_upgrade_defaults_existing_exams_visible(self):
+        self.make_legacy()
+        conn=sqlite3.connect(self.db)
+        conn.execute('CREATE TABLE schema_meta(version INTEGER NOT NULL)')
+        conn.execute('INSERT INTO schema_meta VALUES(6)')
+        old=conn.execute('SELECT * FROM scores').fetchall()
+        conn.commit();conn.close()
+        self.migrate();self.migrate()
+        conn=sqlite3.connect(self.db)
+        self.assertEqual(conn.execute('SELECT published FROM exams').fetchall(),[(1,)])
+        self.assertEqual(conn.execute('SELECT * FROM scores').fetchall(),old)
+        self.assertEqual(conn.execute('SELECT version FROM schema_meta').fetchone()[0],7)
+        conn.close()
+        self.assertEqual(len(list((self.root/'backups').glob('*.db'))),1)
+
     def test_migration_preserves_data_and_backups_idempotent(self):
         self.make_legacy()
         conn=sqlite3.connect(self.db);conn.execute("INSERT INTO exams(id,name,teacher_id) VALUES(100,'已删考试',7)");conn.execute('DELETE FROM exams WHERE id=100');conn.commit();conn.close()
@@ -906,7 +947,7 @@ class MigrationTests(unittest.TestCase):
         after = {table:conn.execute(f'SELECT * FROM {table} ORDER BY id').fetchall() for table in tables}
         self.assertEqual(before, after)
         self.assertEqual(conn.execute('SELECT * FROM parent_students').fetchall(), [(uid,10)])
-        self.assertEqual(conn.execute('SELECT version FROM schema_meta').fetchone()[0], 6)
+        self.assertEqual(conn.execute('SELECT version FROM schema_meta').fetchone()[0], 7)
         self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(), [])
         conn.close()
         backups = list((self.root/'backups').glob('*.db'))
