@@ -4,7 +4,9 @@
 <div class="card">
   <h2>📊 {% if stu.student_code %}{{ stu.student_code }} · {% endif %}{{ stu.name }} 的成绩</h2>
   <p style="margin-bottom:12px; font-size:13px;" class="no-print">
+    {% if not student_view %}
     <a href="/score/{{ stu.id }}">✏️ 继续录成绩</a> ｜ <a href="/">← 返回名单</a>
+    {% endif %}
     <button onclick="window.print()" class="btn btn-blue"
             style="padding:5px 12px; font-size:12px; margin-left:8px;">🖨️ 打印成绩单</button>
   </p>
@@ -19,7 +21,7 @@
   {% if rows %}
   <div class="table-scroll"><table>
     <thead>
-      <tr><th>考试</th><th>科目</th><th>分数</th><th>状态</th><th class="no-print">操作</th></tr>
+      <tr><th>考试</th><th>科目</th><th>分数</th><th>状态</th>{% if not student_view %}<th class="no-print">操作</th>{% endif %}</tr>
     </thead>
     <tbody>
       {% for r in rows %}
@@ -33,9 +35,9 @@
           {% elif r.fail %}<span class="badge badge-fail">⚠️ 不及格</span>
           {% else %}<span class="badge badge-ok">✅ 及格</span>{% endif %}
         </td>
-        <td class="no-print"><a href="/edit_score/{{ r.id }}">✏️ 修改</a>
+        {% if not student_view %}<td class="no-print"><a href="/edit_score/{{ r.id }}">✏️ 修改</a>
           <form action="/delete_score/{{ r.id }}" method="post" style="display:inline" onsubmit="return confirm('确定删除这条成绩吗？');">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-delete">删除</button></form></td>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-delete">删除</button></form></td>{% endif %}
       </tr>
       {% endfor %}
     </tbody>

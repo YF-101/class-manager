@@ -336,6 +336,31 @@ class SiteTests(unittest.TestCase):
         self.assertEqual((row['name'],row['student_code']),('学生甲改名','A100'))
         self.assertEqual(self.b.get(f'/edit_student/{sid}').status_code,404)
 
+    def test_student_account_sees_only_own_scores(self):
+        self.save(score=91)
+        response=self.post(self.a,f'/student/{self.sa}/account',{'email':'student@example.invalid','password':'StudentPass123!'})
+        self.assertEqual(response.status_code,302)
+        student=self.client('student_'+str(self.sa),'StudentPass123!')
+        self.assertEqual(student.get('/').location,'/change_password')
+        self.post(student,'/change_password',{'old_password':'StudentPass123!','new_password':'StudentChanged123!','confirm_password':'StudentChanged123!'})
+        self.assertEqual(student.get('/').location,f'/student/{self.sa}')
+        own=student.get(f'/student/{self.sa}')
+        self.assertEqual(own.status_code,200)
+        self.assertIn('91',own.text)
+        self.assertNotIn('继续录成绩',own.text)
+        self.assertEqual(student.get(f'/student/{self.s2}').status_code,404)
+        for path in ['/classes','/exams','/summary','/export_excel',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
+            self.assertEqual(student.get(path).status_code,403,path)
+
+    def test_student_account_requires_unique_email_and_single_binding(self):
+        self.post(self.a,f'/student/{self.sa}/account',{'email':'teacher_a@example.invalid','password':'StudentPass123!'})
+        self.assertFalse(self.sql("SELECT 1 FROM users WHERE role='student'"))
+        self.post(self.a,f'/student/{self.sa}/account',{'email':'student@example.invalid','password':'StudentPass123!'})
+        self.post(self.a,f'/student/{self.sa}/account',{'email':'second@example.invalid','password':'StudentPass123!'})
+        self.assertEqual(len(self.sql('SELECT id FROM users WHERE student_id=?',(self.sa,))),1)
+        self.post(self.a,f'/delete/{self.sa}')
+        self.assertFalse(self.sql("SELECT 1 FROM users WHERE email='student@example.invalid'"))
+
     def test_admin_created_user_forced_to_change_password(self):
         self.post(self.admin,'/add_user',{'username':'new_teacher','email':'new@example.invalid','password':'InitialPass123!'})
         c=self.client('new_teacher','InitialPass123!')
@@ -416,6 +441,7 @@ class MigrationTests(unittest.TestCase):
         conn=sqlite3.connect(self.db)
         self.assertEqual(conn.execute('SELECT id,score,exam_id FROM scores').fetchone(),(30,90,20))
         self.assertEqual(conn.execute('SELECT must_change_password FROM users').fetchone()[0],1)
+        self.assertEqual(conn.execute("SELECT role FROM users WHERE username='admin'").fetchone()[0],'admin')
         cursor=conn.execute("INSERT INTO exams(name,teacher_id) VALUES('期中',8)");self.assertGreater(cursor.lastrowid,100);conn.commit();conn.close()
         backups=list((self.root/'backups').glob('*.db'));self.assertEqual(len(backups),1)
         original=sqlite3.connect(backups[0]);self.assertEqual(original.execute('SELECT score FROM scores').fetchone()[0],90);original.close()

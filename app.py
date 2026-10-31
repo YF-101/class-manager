@@ -102,6 +102,7 @@ def check_request():
         else:
             g.user = user
             session['user'] = user['username']
+            session['role'] = user['role']
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
         actual = request.form.get('csrf_token', '')
         expected = session.get('csrf_token', '')
@@ -109,6 +110,9 @@ def check_request():
             abort(400, description='页面已过期或请求无法验证，请刷新页面后重试。')
     if g.user and g.user['must_change_password'] and request.endpoint not in ('change_password', 'logout', 'static'):
         return redirect(url_for('change_password'))
+    if g.user and g.user['role'] == 'student' and request.endpoint not in (
+            'index', 'student_page', 'change_password', 'logout', 'static'):
+        abort(403, description='学生账号只能查看本人的成绩。')
 
 
 @app.after_request
@@ -146,17 +150,19 @@ def admin_required(fn):
     @wraps(fn)
     @login_required
     def wrapped(*args, **kwargs):
-        if g.user['username'] != 'admin':
+        if g.user['role'] != 'admin':
             abort(403, description='只有管理员可以执行此操作。')
         return fn(*args, **kwargs)
     return wrapped
 
 
 def is_admin():
-    return g.user is not None and g.user['username'] == 'admin'
+    return g.user is not None and g.user['role'] == 'admin'
 
 
 def get_my_student(conn, sid):
+    if g.user['role'] == 'student':
+        return conn.execute('SELECT * FROM students WHERE id=? AND id=?', (sid, g.user['student_id'])).fetchone()
     if is_admin():
         return conn.execute('SELECT * FROM students WHERE id=?', (sid,)).fetchone()
     return conn.execute('SELECT * FROM students WHERE id=? AND teacher_id=?', (sid, g.user['id'])).fetchone()
@@ -345,7 +351,7 @@ def login():
                 user = conn.execute('SELECT * FROM users WHERE username=? AND (email IS NULL OR email="") AND active=1', (identifier,)).fetchone()
         if len(password) <= 128 and user and check_password_hash(user['password'], password):
             session.clear()
-            session.update(user=user['username'], uid=user['id'], session_version=user['session_version'])
+            session.update(user=user['username'], uid=user['id'], role=user['role'], session_version=user['session_version'])
             session.permanent = True
             if not user['email']:
                 flash('该账号尚未登记邮箱。目前可继续用用户名登录；请联系管理员补充邮箱。')
@@ -487,7 +493,7 @@ def change_password():
 @admin_required
 def user_list():
     with database() as conn:
-        users = conn.execute('SELECT id,username,email,active FROM users ORDER BY id').fetchall()
+        users = conn.execute('SELECT id,username,email,role,active FROM users ORDER BY id').fetchall()
     return render_template('users.html', users=users, error=None)
 
 
@@ -532,6 +538,10 @@ def enable_user(uid):
 @app.route('/')
 @login_required
 def index():
+    if g.user['role'] == 'student':
+        if g.user['student_id'] is None:
+            abort(403, description='学生账号尚未绑定学生档案，请联系老师。')
+        return redirect(url_for('student_page', sid=g.user['student_id']))
     with database() as conn:
         classes = own_classes(conn)
         cur_class = requested_class(conn, request.args.get('class_id'))
@@ -584,7 +594,36 @@ def edit_student(sid):
                 flash('学生档案已更新。')
                 return redirect(url_for('index', class_id=target['id']))
         classes = own_classes(conn)
-    return render_template('edit_student.html', student=student, classes=classes, error=error)
+        account = conn.execute('SELECT id,email,active FROM users WHERE student_id=?', (sid,)).fetchone()
+    return render_template('edit_student.html', student=student, classes=classes, account=account, error=error)
+
+
+@app.route('/student/<int:sid>/account', methods=['POST'])
+@login_required
+def create_student_account(sid):
+    email = request.form.get('email', '').strip().lower()
+    password = request.form.get('password', '')
+    with database(write=True) as conn:
+        student = require_student(conn, sid)
+        if conn.execute('SELECT 1 FROM users WHERE student_id=?', (sid,)).fetchone():
+            flash('该学生已经有登录账号。')
+        elif not valid_email(email):
+            flash('请输入正确的学生邮箱。')
+        elif password_error(password):
+            flash(password_error(password))
+        elif conn.execute('SELECT 1 FROM users WHERE lower(email)=?', (email,)).fetchone():
+            flash('该邮箱已被其他账号使用。')
+        else:
+            username = f'student_{sid}'
+            suffix = 1
+            while conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
+                suffix += 1
+                username = f'student_{sid}_{suffix}'
+            conn.execute('''INSERT INTO users(username,password,email,role,student_id,must_change_password)
+                            VALUES(?,?,?,?,?,1)''',
+                         (username, generate_password_hash(password), email, 'student', student['id']))
+            flash('学生账号已创建，首次登录需要修改密码。')
+    return redirect(url_for('edit_student', sid=sid))
 
 
 @app.route('/classes')
@@ -717,12 +756,13 @@ def student_page(sid):
     with database() as conn:
         student = require_student(conn, sid)
         rows = get_student_scores(conn, sid)
-        exams = [dict(e) for e in own_exams(conn) if e['teacher_id'] == student['teacher_id']]
+        exams = [dict(e) for e in conn.execute('SELECT * FROM exams WHERE teacher_id=? ORDER BY id', (student['teacher_id'],)).fetchall()]
     chart = {}
     for row in rows:
         if row['valid'] and row['status'] == 'recorded':
             chart.setdefault(row['subject'], {})[str(row['exam_id'])] = round(row['score'] / row['max_score'] * 100, 2)
     return render_template('student.html', stu=student, rows=rows, all_exams=exams, chart=chart,
+                           student_view=g.user['role'] == 'student',
                            print_date=datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d'))
 
 
@@ -930,6 +970,10 @@ def summary():
 def delete_student(sid):
     with database(write=True) as conn:
         require_student(conn, sid)
+        account = conn.execute('SELECT email FROM users WHERE student_id=?', (sid,)).fetchone()
+        if account:
+            conn.execute('DELETE FROM reset_tokens WHERE lower(email)=lower(?)', (account['email'],))
+            conn.execute('DELETE FROM users WHERE student_id=?', (sid,))
         conn.execute('DELETE FROM scores WHERE student_id=?', (sid,))
         conn.execute('DELETE FROM students WHERE id=?', (sid,))
     return redirect(url_for('index'))

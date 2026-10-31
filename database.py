@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def connect(path):
@@ -76,7 +76,7 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
                 conn.rollback()
                 return
         definitions = [
-            'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, email TEXT)',
+            "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, email TEXT, role TEXT NOT NULL DEFAULT 'teacher', student_id INTEGER)",
             'CREATE TABLE IF NOT EXISTS classes (id INTEGER PRIMARY KEY AUTOINCREMENT, teacher_id INTEGER NOT NULL, name TEXT NOT NULL, grade TEXT, school_year TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL DEFAULT 0, UNIQUE(teacher_id,name))',
             'CREATE TABLE IF NOT EXISTS students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER, class_id INTEGER, student_code TEXT)',
             'CREATE TABLE IF NOT EXISTS exams (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher_id INTEGER, class_id INTEGER)',
@@ -87,7 +87,7 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
         for statement in definitions:
             conn.execute(statement)
         additions = {
-            'users': {'email': 'TEXT', 'active': 'INTEGER NOT NULL DEFAULT 1', 'session_version': 'INTEGER NOT NULL DEFAULT 1', 'must_change_password': 'INTEGER NOT NULL DEFAULT 0'},
+            'users': {'email': 'TEXT', 'active': 'INTEGER NOT NULL DEFAULT 1', 'session_version': 'INTEGER NOT NULL DEFAULT 1', 'must_change_password': 'INTEGER NOT NULL DEFAULT 0', 'role': "TEXT NOT NULL DEFAULT 'teacher'", 'student_id': 'INTEGER'},
             'students': {'teacher_id': 'INTEGER', 'class_id': 'INTEGER', 'student_code': 'TEXT'},
             'exams': {'teacher_id': 'INTEGER', 'class_id': 'INTEGER'},
             'scores': {'exam_id': 'INTEGER', 'exam': 'TEXT', 'status': "TEXT NOT NULL DEFAULT 'recorded'"},
@@ -126,12 +126,13 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
                     output.write(password + '\n')
         admin = conn.execute("SELECT * FROM users WHERE username='admin'").fetchone()
         if admin:
+            conn.execute("UPDATE users SET role='admin' WHERE id=?", (admin['id'],))
             if check_password_hash(admin['password'], 'admin123'):
                 conn.execute('UPDATE users SET must_change_password=1 WHERE id=?', (admin['id'],))
             for table in ['students', 'exams']:
                 conn.execute(f'UPDATE {table} SET teacher_id=? WHERE teacher_id IS NULL', (admin['id'],))
         # Give every existing owner a default class, then attach legacy records.
-        owners = conn.execute('SELECT id FROM users').fetchall()
+        owners = conn.execute("SELECT id FROM users WHERE role IN ('admin','teacher')").fetchall()
         now = datetime.now(timezone.utc).timestamp()
         for owner in owners:
             conn.execute('INSERT OR IGNORE INTO classes(teacher_id,name,grade,school_year,created_at) VALUES(?,?,?,?,?)',
@@ -164,6 +165,7 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             ('exams_class', 'exams', 'class_id'),
         ]:
             conn.execute(f'CREATE INDEX IF NOT EXISTS {name} ON {table}({cols})')
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_student ON users(student_id) WHERE student_id IS NOT NULL')
         # Existing invalid legacy records are kept for repair. New writes must be valid.
         for event in ['INSERT', 'UPDATE']:
             conn.execute(f'''CREATE TRIGGER IF NOT EXISTS scores_valid_{event.lower()} BEFORE {event} ON scores

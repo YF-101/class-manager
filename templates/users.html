@@ -34,7 +34,8 @@
         <td>{{ u.username }}</td>
         <td>{{ u.email or '未登记（暂用用户名登录）' }}</td>
         <td>
-          {% if u.username == "admin" %}<span class="badge badge-fail">管理员</span>
+          {% if u.role == "admin" %}<span class="badge badge-fail">管理员</span>
+          {% elif u.role == "student" %}<span class="badge">学生</span>
           {% else %}<span class="badge badge-ok">老师</span>{% endif %}
         </td>
         <td>

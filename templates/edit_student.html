@@ -12,4 +12,19 @@
   </form>
   <p style="margin-top:14px;font-size:13px;"><a href="/?class_id={{ student.class_id }}">← 返回班级</a></p>
 </div>
+<div class="card">
+  <h2>学生登录账号</h2>
+  {% if account %}
+  <p>登录邮箱：<strong>{{ account.email }}</strong></p>
+  <p class="muted">状态：{% if account.active %}正常{% else %}已停用{% endif %}。学生登录后只能查看自己的成绩。</p>
+  {% else %}
+  <form action="/student/{{ student.id }}/account" method="post" style="display:grid;gap:12px;max-width:520px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>学生邮箱<input type="email" name="email" autocomplete="email" required placeholder="用于学生登录和找回密码"></label>
+    <label>初始密码<input type="password" name="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+    <button class="btn btn-green">创建学生账号</button>
+  </form>
+  <p class="muted" style="margin-top:12px;">首次登录会要求学生修改初始密码。</p>
+  {% endif %}
+</div>
 {% endblock %}
