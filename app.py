@@ -110,9 +110,9 @@ def check_request():
             abort(400, description='页面已过期或请求无法验证，请刷新页面后重试。')
     if g.user and g.user['must_change_password'] and request.endpoint not in ('change_password', 'logout', 'static'):
         return redirect(url_for('change_password'))
-    if g.user and g.user['role'] == 'student' and request.endpoint not in (
+    if g.user and g.user['role'] in ('student', 'parent') and request.endpoint not in (
             'index', 'student_page', 'change_password', 'logout', 'static'):
-        abort(403, description='学生账号只能查看本人的成绩。')
+        abort(403, description='学生和家长账号只能查看已绑定学生的成绩。')
 
 
 @app.after_request
@@ -161,7 +161,7 @@ def is_admin():
 
 
 def get_my_student(conn, sid):
-    if g.user['role'] == 'student':
+    if g.user['role'] in ('student', 'parent'):
         return conn.execute('SELECT * FROM students WHERE id=? AND id=?', (sid, g.user['student_id'])).fetchone()
     if is_admin():
         return conn.execute('SELECT * FROM students WHERE id=?', (sid,)).fetchone()
@@ -538,9 +538,9 @@ def enable_user(uid):
 @app.route('/')
 @login_required
 def index():
-    if g.user['role'] == 'student':
+    if g.user['role'] in ('student', 'parent'):
         if g.user['student_id'] is None:
-            abort(403, description='学生账号尚未绑定学生档案，请联系老师。')
+            abort(403, description='账号尚未绑定学生档案，请联系老师。')
         return redirect(url_for('student_page', sid=g.user['student_id']))
     with database() as conn:
         classes = own_classes(conn)
@@ -594,8 +594,10 @@ def edit_student(sid):
                 flash('学生档案已更新。')
                 return redirect(url_for('index', class_id=target['id']))
         classes = own_classes(conn)
-        account = conn.execute('SELECT id,email,active FROM users WHERE student_id=?', (sid,)).fetchone()
-    return render_template('edit_student.html', student=student, classes=classes, account=account, error=error)
+        account = conn.execute("SELECT id,email,active FROM users WHERE student_id=? AND role='student'", (sid,)).fetchone()
+        parent_accounts = conn.execute("SELECT id,email,active FROM users WHERE student_id=? AND role='parent' ORDER BY id", (sid,)).fetchall()
+    return render_template('edit_student.html', student=student, classes=classes, account=account,
+                           parent_accounts=parent_accounts, error=error)
 
 
 @app.route('/student/<int:sid>/account', methods=['POST'])
@@ -605,7 +607,7 @@ def create_student_account(sid):
     password = request.form.get('password', '')
     with database(write=True) as conn:
         student = require_student(conn, sid)
-        if conn.execute('SELECT 1 FROM users WHERE student_id=?', (sid,)).fetchone():
+        if conn.execute("SELECT 1 FROM users WHERE student_id=? AND role='student'", (sid,)).fetchone():
             flash('该学生已经有登录账号。')
         elif not valid_email(email):
             flash('请输入正确的学生邮箱。')
@@ -623,6 +625,32 @@ def create_student_account(sid):
                             VALUES(?,?,?,?,?,1)''',
                          (username, generate_password_hash(password), email, 'student', student['id']))
             flash('学生账号已创建，首次登录需要修改密码。')
+    return redirect(url_for('edit_student', sid=sid))
+
+
+@app.route('/student/<int:sid>/parent-account', methods=['POST'])
+@login_required
+def create_parent_account(sid):
+    email = request.form.get('email', '').strip().lower()
+    password = request.form.get('password', '')
+    with database(write=True) as conn:
+        student = require_student(conn, sid)
+        if not valid_email(email):
+            flash('请输入正确的家长邮箱。')
+        elif password_error(password):
+            flash(password_error(password))
+        elif conn.execute('SELECT 1 FROM users WHERE lower(email)=?', (email,)).fetchone():
+            flash('该邮箱已被其他账号使用。')
+        else:
+            username = f'parent_{sid}'
+            suffix = 1
+            while conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
+                suffix += 1
+                username = f'parent_{sid}_{suffix}'
+            conn.execute('''INSERT INTO users(username,password,email,role,student_id,must_change_password)
+                            VALUES(?,?,?,?,?,1)''',
+                         (username, generate_password_hash(password), email, 'parent', student['id']))
+            flash('家长账号已创建，首次登录需要修改密码。')
     return redirect(url_for('edit_student', sid=sid))
 
 
@@ -762,7 +790,7 @@ def student_page(sid):
         if row['valid'] and row['status'] == 'recorded':
             chart.setdefault(row['subject'], {})[str(row['exam_id'])] = round(row['score'] / row['max_score'] * 100, 2)
     return render_template('student.html', stu=student, rows=rows, all_exams=exams, chart=chart,
-                           student_view=g.user['role'] == 'student',
+                           student_view=g.user['role'] in ('student', 'parent'),
                            print_date=datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d'))
 
 
@@ -970,10 +998,10 @@ def summary():
 def delete_student(sid):
     with database(write=True) as conn:
         require_student(conn, sid)
-        account = conn.execute('SELECT email FROM users WHERE student_id=?', (sid,)).fetchone()
-        if account:
+        accounts = conn.execute('SELECT email FROM users WHERE student_id=?', (sid,)).fetchall()
+        for account in accounts:
             conn.execute('DELETE FROM reset_tokens WHERE lower(email)=lower(?)', (account['email'],))
-            conn.execute('DELETE FROM users WHERE student_id=?', (sid,))
+        conn.execute('DELETE FROM users WHERE student_id=?', (sid,))
         conn.execute('DELETE FROM scores WHERE student_id=?', (sid,))
         conn.execute('DELETE FROM students WHERE id=?', (sid,))
     return redirect(url_for('index'))

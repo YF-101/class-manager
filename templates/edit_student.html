@@ -27,4 +27,20 @@
   <p class="muted" style="margin-top:12px;">首次登录会要求学生修改初始密码。</p>
   {% endif %}
 </div>
+<div class="card">
+  <h2>家长登录账号</h2>
+  {% if parent_accounts %}
+  <div class="table-scroll"><table>
+    <thead><tr><th>登录邮箱</th><th>状态</th></tr></thead>
+    <tbody>{% for parent in parent_accounts %}<tr><td>{{ parent.email }}</td><td>{% if parent.active %}正常{% else %}已停用{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+  <form action="/student/{{ student.id }}/parent-account" method="post" style="display:grid;gap:12px;max-width:520px;{% if parent_accounts %}margin-top:16px;{% endif %}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>家长邮箱<input type="email" name="email" autocomplete="email" required placeholder="用于家长登录和找回密码"></label>
+    <label>初始密码<input type="password" name="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+    <button class="btn btn-green">添加家长账号</button>
+  </form>
+  <p class="muted" style="margin-top:12px;">可以为一名学生添加多个家长邮箱；家长只能查看该学生的成绩。</p>
+</div>
 {% endblock %}

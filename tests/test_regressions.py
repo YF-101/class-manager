@@ -361,6 +361,37 @@ class SiteTests(unittest.TestCase):
         self.post(self.a,f'/delete/{self.sa}')
         self.assertFalse(self.sql("SELECT 1 FROM users WHERE email='student@example.invalid'"))
 
+    def test_parent_accounts_see_only_bound_student(self):
+        self.save(score=88)
+        self.post(self.a, f'/student/{self.sa}/parent-account',
+                  {'email':'parent1@example.invalid','password':'ParentPass123!'})
+        self.post(self.a, f'/student/{self.sa}/parent-account',
+                  {'email':'parent2@example.invalid','password':'ParentPass123!'})
+        self.assertEqual(len(self.sql("SELECT id FROM users WHERE role='parent' AND student_id=?", (self.sa,))), 2)
+        parent = self.client('parent_'+str(self.sa), 'ParentPass123!')
+        self.post(parent, '/change_password', {'old_password':'ParentPass123!',
+                  'new_password':'ParentChanged123!','confirm_password':'ParentChanged123!'})
+        self.assertEqual(parent.get('/').location, f'/student/{self.sa}')
+        own = parent.get(f'/student/{self.sa}')
+        self.assertEqual(own.status_code, 200)
+        self.assertIn('88', own.text)
+        self.assertNotIn('继续录成绩', own.text)
+        self.assertEqual(parent.get(f'/student/{self.s2}').status_code, 404)
+        for path in ['/classes','/exams','/summary','/export_excel',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
+            self.assertEqual(parent.get(path).status_code, 403, path)
+
+    def test_parent_account_validates_email_and_is_deleted_with_student(self):
+        self.post(self.a, f'/student/{self.sa}/parent-account',
+                  {'email':'teacher_a@example.invalid','password':'ParentPass123!'})
+        self.assertFalse(self.sql("SELECT 1 FROM users WHERE role='parent'"))
+        self.post(self.a, f'/student/{self.sa}/parent-account',
+                  {'email':'parent@example.invalid','password':'ParentPass123!'})
+        self.post(self.a, f'/student/{self.sa}/account',
+                  {'email':'student-after-parent@example.invalid','password':'StudentPass123!'})
+        self.assertTrue(self.sql("SELECT 1 FROM users WHERE role='student' AND student_id=?", (self.sa,)))
+        self.post(self.a, f'/delete/{self.sa}')
+        self.assertFalse(self.sql("SELECT 1 FROM users WHERE email='parent@example.invalid'"))
+
     def test_admin_created_user_forced_to_change_password(self):
         self.post(self.admin,'/add_user',{'username':'new_teacher','email':'new@example.invalid','password':'InitialPass123!'})
         c=self.client('new_teacher','InitialPass123!')

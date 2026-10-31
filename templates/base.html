@@ -141,8 +141,8 @@ button, .btn, .navbtn { white-space:nowrap; }
     <h1>🎓 班主任学生成绩系统</h1>
     <p>记录班级每位学生的成绩与成长</p>
     <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-      {% if g.user.role == 'student' %}
-      <a href="/" class="navbtn">📊 我的成绩</a>
+      {% if g.user.role in ('student', 'parent') %}
+      <a href="/" class="navbtn">📊 {% if g.user.role == 'parent' %}孩子成绩{% else %}我的成绩{% endif %}</a>
       {% else %}
       <a href="/" class="navbtn">👥 学生名单</a>
       <a href="/classes" class="navbtn">🏫 班级管理</a>

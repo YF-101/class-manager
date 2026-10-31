@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def connect(path):
@@ -165,7 +165,10 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             ('exams_class', 'exams', 'class_id'),
         ]:
             conn.execute(f'CREATE INDEX IF NOT EXISTS {name} ON {table}({cols})')
-        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_student ON users(student_id) WHERE student_id IS NOT NULL')
+        # Several parents may share a student; the student has one personal account.
+        conn.execute('DROP INDEX IF EXISTS users_student')
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_student_account ON users(student_id) WHERE student_id IS NOT NULL AND role='student'")
+        conn.execute('CREATE INDEX IF NOT EXISTS users_student_links ON users(student_id) WHERE student_id IS NOT NULL')
         # Existing invalid legacy records are kept for repair. New writes must be valid.
         for event in ['INSERT', 'UPDATE']:
             conn.execute(f'''CREATE TRIGGER IF NOT EXISTS scores_valid_{event.lower()} BEFORE {event} ON scores
