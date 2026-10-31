@@ -622,6 +622,7 @@ class SiteTests(unittest.TestCase):
         self.assertEqual(student.get('/').location,'/change_password')
         self.post(student,'/change_password',{'old_password':'StudentPass123!','new_password':'StudentChanged123!','confirm_password':'StudentChanged123!'})
         self.assertEqual(student.get('/').location,f'/student/{self.sa}')
+        self.assertEqual(student.get(f'/student/{self.sa}').status_code,200)
         own=student.get(f'/student/{self.sa}')
         self.assertEqual(own.status_code,200)
         self.assertIn('91',own.text)
@@ -735,6 +736,39 @@ class SiteTests(unittest.TestCase):
         self.post(self.admin, f'/exam/{self.ea}/publication', {'published':'0'})
         self.assertNotIn('期中考试',parent.get(f'/student/{self.sa}').text)
         self.assertEqual(self.sql('SELECT score FROM scores')[0][0],88)
+
+    def test_student_invite_activation_binds_only_invited_student_and_is_single_use(self):
+        page=self.post(self.a,f'/student/{self.sa}/invite')
+        code=re.search(r'id="invite-code">([^<]+)',page.text)[1]
+        self.assertNotEqual(self.sql('SELECT token_hash FROM student_invites')[0][0],code)
+        c=self.client()
+        data={'code':code,'email':'activated@example.invalid','password':'ActivatedPass123!','confirm':'ActivatedPass123!','role':'admin','student_id':self.sb}
+        self.assertEqual(self.post(c,'/activate_student',data).status_code,302)
+        account=self.sql("SELECT * FROM users WHERE email='activated@example.invalid'")[0]
+        self.assertEqual((account['role'],account['student_id'],account['must_change_password']),('student',self.sa,0))
+        self.assertFalse(self.sql('SELECT 1 FROM student_invites'))
+        self.assertIn('无效或已过期',self.post(c,'/activate_student',{**data,'email':'replay@example.invalid'}).text)
+        student=self.client(account['username'],'ActivatedPass123!')
+        student.get(f'/student/{self.sa}')
+        self.assertEqual(student.get('/').location,f'/student/{self.sa}')
+        self.assertEqual(student.get(f'/student/{self.sb}').status_code,404)
+        self.assertEqual(self.post(student,f'/student/{self.sa}/invite').status_code,403)
+
+    def test_student_invite_scope_expiration_rotation_validation_and_delete(self):
+        route=f'/student/{self.sa}/invite'
+        self.assertEqual(self.post(self.b,route).status_code,404)
+        self.assertEqual(self.a.post(route).status_code,400)
+        def issue():
+            return re.search(r'id="invite-code">([^<]+)',self.post(self.a,route).text)[1]
+        old=issue();new=issue();c=self.client()
+        data={'code':old,'email':'activated@example.invalid','password':'ActivatedPass123!','confirm':'ActivatedPass123!'}
+        self.assertIn('无效或已过期',self.post(c,'/activate_student',data).text)
+        self.assertIn('邮箱已被使用',self.post(c,'/activate_student',{**data,'code':new,'email':'teacher_a@example.invalid'}).text)
+        self.assertTrue(self.sql('SELECT 1 FROM student_invites'))
+        self.sql('UPDATE student_invites SET expires_at=0')
+        self.assertIn('无效或已过期',self.post(c,'/activate_student',{**data,'code':new}).text)
+        issue();self.post(self.a,f'/delete/{self.sa}')
+        self.assertFalse(self.sql('SELECT 1 FROM student_invites'))
 
     def test_role_entry_guides_and_role_selection_cannot_grant_permissions(self):
         c=self.client()
@@ -931,7 +965,7 @@ class MigrationTests(unittest.TestCase):
         conn=sqlite3.connect(self.db)
         self.assertEqual(conn.execute('SELECT published FROM exams').fetchall(),[(1,)])
         self.assertEqual(conn.execute('SELECT * FROM scores').fetchall(),old)
-        self.assertEqual(conn.execute('SELECT version FROM schema_meta').fetchone()[0],7)
+        self.assertEqual(conn.execute('SELECT version FROM schema_meta').fetchone()[0],8)
         conn.close()
         self.assertEqual(len(list((self.root/'backups').glob('*.db'))),1)
 
@@ -965,7 +999,7 @@ class MigrationTests(unittest.TestCase):
         after = {table:conn.execute(f'SELECT * FROM {table} ORDER BY id').fetchall() for table in tables}
         self.assertEqual(before, after)
         self.assertEqual(conn.execute('SELECT * FROM parent_students').fetchall(), [(uid,10)])
-        self.assertEqual(conn.execute('SELECT version FROM schema_meta').fetchone()[0], 7)
+        self.assertEqual(conn.execute('SELECT version FROM schema_meta').fetchone()[0], 8)
         self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(), [])
         conn.close()
         backups = list((self.root/'backups').glob('*.db'))

@@ -408,6 +408,56 @@ def register():
     return render_template('register.html', error=error)
 
 
+@app.route('/student/<int:sid>/invite', methods=['POST'])
+@login_required
+def student_invite(sid):
+    with database(write=True) as conn:
+        student = require_student(conn, sid)
+        if conn.execute("SELECT 1 FROM users WHERE role='student' AND student_id=?", (sid,)).fetchone():
+            abort(400, description='该学生已有账号，请使用原账号或找回密码。')
+        code = secrets.token_urlsafe(24)
+        conn.execute('INSERT OR REPLACE INTO student_invites(student_id,token_hash,expires_at) VALUES(?,?,?)',
+                     (sid,hashlib.sha256(code.encode()).hexdigest(),unix_time()+48*3600))
+    return render_template('student_invite.html', student=student, code=code)
+
+
+@app.route('/activate_student', methods=['GET','POST'])
+def activate_student():
+    if g.user:
+        return redirect(url_for('index'))
+    error = None
+    if request.method == 'POST':
+        if not consume_limits([('student_activate_ip',request.remote_addr,20,3600)]):
+            abort(429, description='尝试过于频繁，请稍后重试。')
+        code = request.form.get('code','').strip()
+        email = request.form.get('email','').strip().lower()
+        password = request.form.get('password','')
+        with database(write=True) as conn:
+            invite = conn.execute('''SELECT i.student_id FROM student_invites i JOIN students s ON s.id=i.student_id
+                JOIN users t ON t.id=s.teacher_id AND t.active=1
+                WHERE i.token_hash=? AND i.expires_at>?''',
+                (hashlib.sha256(code.encode()).hexdigest(),unix_time())).fetchone()
+            if not invite or len(code)>128:
+                error = '邀请码无效或已过期，请联系老师重新生成。'
+            elif conn.execute("SELECT 1 FROM users WHERE student_id=? AND role='student'", (invite['student_id'],)).fetchone():
+                error = '该学生已开通账号，请直接登录或找回密码。'
+            elif not valid_email(email):
+                error = '请输入正确的登录邮箱。'
+            elif password_error(password):
+                error = password_error(password)
+            elif password != request.form.get('confirm',''):
+                error = '两次输入的密码不一致。'
+            elif conn.execute('SELECT 1 FROM users WHERE lower(email)=?', (email,)).fetchone():
+                error = '该邮箱已被使用，请登录原账号或更换邮箱。'
+            else:
+                username = 'student_'+secrets.token_hex(10)
+                conn.execute('INSERT INTO users(username,password,email,role,student_id,must_change_password) VALUES(?,?,?,?,?,0)',
+                             (username,generate_password_hash(password),email,'student',invite['student_id']))
+                conn.execute('DELETE FROM student_invites WHERE student_id=?', (invite['student_id'],))
+                return redirect(url_for('login',role='student',registered=1))
+    return render_template('activate_student.html',error=error)
+
+
 @app.route('/forgot_password', methods=['GET', 'POST'])
 def forgot_password():
     error = None

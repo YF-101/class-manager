@@ -18,6 +18,10 @@
   <p>登录邮箱：<strong>{{ account.email }}</strong></p>
   <p class="muted">状态：{% if account.active %}正常{% else %}已停用{% endif %}。学生登录后只能查看自己的成绩。</p>
   {% else %}
+  <form action="{{ url_for('student_invite',sid=student.id) }}" method="post" style="margin-bottom:18px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-blue">生成学生激活邀请码</button>
+    <p style="margin-top:8px;">推荐：把邀请码交给学生，由学生填写邮箱并设置自己的密码。重新生成会使旧码失效。</p>
+  </form>
   <form action="/student/{{ student.id }}/account" method="post" style="display:grid;gap:12px;max-width:520px;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label>学生邮箱<input type="email" name="email" autocomplete="email" required placeholder="用于学生登录和找回密码"></label>

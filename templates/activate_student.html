@@ -1,0 +1,12 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>开通学生账号</title>
+<style>body{font-family:system-ui,sans-serif;background:#eef2f9;color:#1f2937;padding:24px}main{max-width:440px;margin:30px auto;background:white;padding:28px;border-radius:16px}label{display:block;margin:16px 0}input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:6px;border:1px solid #cbd5e1;border-radius:8px}button{background:#1e3a8a;color:white;cursor:pointer}a{color:#2563eb}.error{color:#b91c1c}</style></head><body><main>
+<h1>开通我的学生账号</h1><p>请先向老师领取专属邀请码，账号会自动绑定对应学生档案。</p>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="{{ url_for('activate_student') }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label>老师提供的邀请码<input name="code" required maxlength="128" autocomplete="off"></label>
+<label>我的登录邮箱<input type="email" name="email" required autocomplete="username"></label>
+<label>设置密码<input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password"></label>
+<label>确认密码<input type="password" name="confirm" required minlength="8" maxlength="128" autocomplete="new-password"></label>
+<button>激活学生账号</button></form><p>密码由你自己设置，激活后可直接登录。</p><a href="{{ url_for('login',role='student') }}">已有账号，返回学生登录</a>
+</main></body></html>

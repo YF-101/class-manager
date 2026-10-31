@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}<div class="card">
+<h2>{{ student.name }} 的学生激活邀请码</h2>
+<p style="line-height:1.8;">请将下方邀请码交给这名学生，48小时内有效，只能使用一次。重新生成后旧码立即失效。</p>
+<p style="padding:18px;background:#eff6ff;overflow-wrap:anywhere;font-family:monospace;font-size:20px;" id="invite-code">{{ code }}</p>
+<p style="line-height:1.8;margin-top:14px;">学生打开本站“我是学生 → 凭邀请码开通账号”，填写邀请码、自己的邮箱并设置密码即可。邀请码只在本页显示，请妥善转交。</p>
+<p style="margin-top:16px;"><a href="{{ url_for('edit_student',sid=student.id) }}">返回账号与档案</a></p>
+</div>{% endblock %}

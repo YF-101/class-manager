@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def connect(path):
@@ -61,6 +61,12 @@ def init_parent_links(conn):
         SELECT u.id,u.student_id FROM users u JOIN students s ON s.id=u.student_id WHERE u.role='parent' ''')
 
 
+def init_student_invites(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS student_invites (
+        student_id INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
+        token_hash TEXT UNIQUE NOT NULL, expires_at REAL NOT NULL)''')
+
+
 def init_database(path, backup_dir, instance_dir, initial_password=None):
     """Additive migration, with backup before changing an existing database."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -85,12 +91,13 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             if conn.execute('SELECT version FROM schema_meta').fetchone()[0] == SCHEMA_VERSION:
                 conn.rollback()
                 return
-        if version in (5, 6):
+        if version in (5, 6, 7):
             # Only add associations: preserve accounts, hashes, sessions and reset tokens.
             if version == 5:
                 init_parent_links(conn)
             if 'published' not in {r['name'] for r in conn.execute('PRAGMA table_info(exams)')}:
                 conn.execute('ALTER TABLE exams ADD COLUMN published INTEGER NOT NULL DEFAULT 1')
+            init_student_invites(conn)
             conn.execute('UPDATE schema_meta SET version=?', (SCHEMA_VERSION,))
             conn.commit()
             return
@@ -198,6 +205,7 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
         init_parent_links(conn)
         if 'published' not in {r['name'] for r in conn.execute('PRAGMA table_info(exams)')}:
             conn.execute('ALTER TABLE exams ADD COLUMN published INTEGER NOT NULL DEFAULT 1')
+        init_student_invites(conn)
         conn.execute('CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL)')
         conn.execute('DELETE FROM schema_meta')
         conn.execute('INSERT INTO schema_meta VALUES(?)', (SCHEMA_VERSION,))
