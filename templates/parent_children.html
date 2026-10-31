@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>👨‍👩‍👧 我的孩子</h2>
+  {% if children %}
+  <p style="margin-bottom:14px;">请选择要查看成绩的孩子。</p>
+  <ul class="student-list">{% for child in children %}<li>
+    <span class="name">{{ child.name }}{% if child.student_code %} · {{ child.student_code }}{% endif %}<small style="display:block;margin-top:5px;" class="muted">{{ child.class_name or '未分班' }}</small></span>
+    <a href="{{ url_for('student_page', sid=child.id) }}">查看成绩 →</a>
+  </li>{% endfor %}</ul>
+  {% else %}
+  <p>目前没有关联孩子，请联系老师在学生档案页关联你的家长邮箱。你可以在上方修改密码或退出登录。</p>
+  {% endif %}
+</div>
+{% endblock %}

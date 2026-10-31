@@ -638,6 +638,83 @@ class SiteTests(unittest.TestCase):
         self.post(self.a,f'/delete/{self.sa}')
         self.assertFalse(self.sql("SELECT 1 FROM users WHERE email='student@example.invalid'"))
 
+    def make_multi_parent(self):
+        self.post(self.a, f'/student/{self.sa}/parent-account',
+                  {'email':'multi-parent@example.invalid','password':'ParentPass123!'})
+        uid = self.sql("SELECT id FROM users WHERE email='multi-parent@example.invalid'")[0][0]
+        client = self.client('parent_'+str(self.sa), 'ParentPass123!')
+        self.post(client, '/change_password', {'old_password':'ParentPass123!',
+                  'new_password':'ChangedParent123!','confirm_password':'ChangedParent123!'})
+        return uid, client
+
+    def test_parent_multi_links_children_across_teachers_without_resetting_password(self):
+        uid, parent = self.make_multi_parent()
+        original = tuple(self.sql('SELECT password,session_version,must_change_password FROM users WHERE id=?', (uid,))[0])
+        self.post(self.b, f'/student/{self.sb}/parent-account', {'email':'MULTI-PARENT@example.invalid'})
+        self.assertEqual(tuple(self.sql('SELECT password,session_version,must_change_password FROM users WHERE id=?', (uid,))[0]), original)
+        self.assertEqual(len(self.sql('SELECT * FROM parent_students WHERE parent_id=?', (uid,))), 2)
+        home = parent.get('/')
+        self.assertEqual(home.status_code, 200)
+        self.assertIn('我的孩子', home.text)
+        self.assertIn('其他老师学生', home.text)
+        self.assertNotIn('学生乙', home.text)
+        for sid in [self.sa,self.sb]:
+            page = parent.get(f'/student/{sid}')
+            self.assertEqual(page.status_code, 200)
+            self.assertIn('切换孩子', page.text)
+        self.assertEqual(parent.get(f'/student/{self.s2}').status_code, 404)
+        self.assertIn('multi-parent@example.invalid', self.b.get(f'/edit_student/{self.sb}').text)
+        self.assertNotIn('学生甲', self.b.get(f'/edit_student/{self.sb}').text)
+
+    def test_parent_multi_delete_one_child_keeps_account_and_remaining_access(self):
+        uid, parent = self.make_multi_parent()
+        self.post(self.a, f'/student/{self.s2}/parent-account', {'email':'multi-parent@example.invalid'})
+        self.sql('INSERT INTO reset_tokens(email,token,expires_at) VALUES(?,?,?)',
+                 ('multi-parent@example.invalid','preserved-token',time.time()+300))
+        self.post(self.a, f'/delete/{self.sa}')
+        self.assertTrue(self.sql('SELECT 1 FROM users WHERE id=?', (uid,)))
+        self.assertTrue(self.sql("SELECT 1 FROM reset_tokens WHERE email='multi-parent@example.invalid'"))
+        self.assertEqual(parent.get('/').location, f'/student/{self.s2}')
+        self.assertEqual(parent.get(f'/student/{self.sa}').status_code, 404)
+        self.assertEqual(parent.get(f'/student/{self.s2}').status_code, 200)
+        self.post(self.a, f'/delete/{self.s2}')
+        self.assertFalse(self.sql('SELECT 1 FROM users WHERE id=?', (uid,)))
+        self.assertFalse(self.sql('SELECT 1 FROM parent_students WHERE parent_id=?', (uid,)))
+        self.assertFalse(self.sql("SELECT 1 FROM reset_tokens WHERE email='multi-parent@example.invalid'"))
+        self.assertEqual(parent.get('/').location, '/login')
+
+    def test_parent_multi_unlink_is_scoped_immediate_and_relinkable(self):
+        uid, parent = self.make_multi_parent()
+        self.post(self.a, f'/student/{self.s2}/parent-account', {'email':'multi-parent@example.invalid'})
+        route = f'/student/{self.sa}/parent-account/{uid}/unlink'
+        self.assertEqual(self.post(self.b, route).status_code, 404)
+        self.assertEqual(self.post(parent, route).status_code, 403)
+        self.assertEqual(self.a.post(route).status_code, 400)
+        self.assertEqual(self.post(self.a, route).status_code, 302)
+        self.assertEqual(parent.get(f'/student/{self.sa}').status_code, 404)
+        self.assertEqual(parent.get(f'/student/{self.s2}').status_code, 200)
+        self.assertEqual(self.post(self.a, route).status_code, 404)
+        self.post(self.a, f'/student/{self.s2}/parent-account/{uid}/unlink')
+        self.assertEqual(parent.get('/').status_code, 200)
+        self.assertIn('目前没有关联孩子', parent.get('/').text)
+        self.assertIn('退出', parent.get('/').text)
+        self.assertTrue(self.sql('SELECT 1 FROM users WHERE id=?', (uid,)))
+        self.post(self.a, f'/student/{self.sa}/parent-account', {'email':'multi-parent@example.invalid'})
+        self.assertEqual(parent.get('/').location, f'/student/{self.sa}')
+        self.assertEqual(self.sql('SELECT student_id FROM users WHERE id=?', (uid,))[0][0], self.sa)
+
+    def test_parent_multi_duplicate_disabled_and_other_role_emails_rejected(self):
+        uid, _ = self.make_multi_parent()
+        self.post(self.a, f'/student/{self.sa}/parent-account', {'email':'multi-parent@example.invalid'})
+        self.assertEqual(len(self.sql('SELECT 1 FROM parent_students WHERE parent_id=?', (uid,))), 1)
+        self.post(self.admin, f'/delete_user/{uid}')
+        self.post(self.a, f'/student/{self.s2}/parent-account', {'email':'multi-parent@example.invalid'})
+        self.assertEqual(len(self.sql('SELECT 1 FROM parent_students WHERE parent_id=?', (uid,))), 1)
+        self.post(self.a, f'/student/{self.s2}/parent-account', {'email':'teacher_a@example.invalid'})
+        self.assertFalse(self.sql('SELECT 1 FROM parent_students WHERE student_id=?', (self.s2,)))
+        self.post(self.a, f'/student/{self.s2}/parent-account', {'email':'new-parent@example.invalid'})
+        self.assertFalse(self.sql("SELECT 1 FROM users WHERE email='new-parent@example.invalid'"))
+
     def test_parent_accounts_see_only_bound_student(self):
         self.save(score=88)
         self.post(self.a, f'/student/{self.sa}/parent-account',
@@ -810,6 +887,41 @@ class MigrationTests(unittest.TestCase):
         cursor=conn.execute("INSERT INTO exams(name,teacher_id) VALUES('期中',8)");self.assertGreater(cursor.lastrowid,100);conn.commit();conn.close()
         backups=list((self.root/'backups').glob('*.db'));self.assertEqual(len(backups),1)
         original=sqlite3.connect(backups[0]);self.assertEqual(original.execute('SELECT score FROM scores').fetchone()[0],90);original.close()
+
+    def test_parent_multi_v5_migration_preserves_accounts_tokens_and_business_rows(self):
+        self.make_legacy(); self.migrate()
+        conn = sqlite3.connect(self.db)
+        conn.execute('DROP TABLE parent_students')
+        conn.execute('UPDATE schema_meta SET version=5')
+        conn.execute('INSERT INTO users(username,password,email,role,student_id,session_version,must_change_password) VALUES(?,?,?,?,?,?,?)',
+                     ('legacy_parent',generate_password_hash('ExistingParent123!'),'legacy-parent@example.invalid','parent',10,9,0))
+        uid = conn.execute("SELECT id FROM users WHERE username='legacy_parent'").fetchone()[0]
+        conn.execute('INSERT INTO reset_tokens(email,token,expires_at,delivered) VALUES(?,?,?,1)',
+                     ('legacy-parent@example.invalid','unchanged',time.time()+300))
+        tables = ['users','students','classes','exams','exam_subjects','scores','reset_tokens']
+        before = {table:conn.execute(f'SELECT * FROM {table} ORDER BY id').fetchall() for table in tables}
+        conn.commit(); conn.close()
+        self.migrate(); self.migrate()
+        conn = sqlite3.connect(self.db)
+        after = {table:conn.execute(f'SELECT * FROM {table} ORDER BY id').fetchall() for table in tables}
+        self.assertEqual(before, after)
+        self.assertEqual(conn.execute('SELECT * FROM parent_students').fetchall(), [(uid,10)])
+        self.assertEqual(conn.execute('SELECT version FROM schema_meta').fetchone()[0], 6)
+        self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(), [])
+        conn.close()
+        backups = list((self.root/'backups').glob('*.db'))
+        self.assertEqual(len(backups), 2)
+        version_five_backups = 0
+        for path in backups:
+            saved = sqlite3.connect(path)
+            try:
+                if saved.execute("SELECT 1 FROM sqlite_master WHERE name='schema_meta'").fetchone():
+                    self.assertEqual(saved.execute('SELECT version FROM schema_meta').fetchone()[0], 5)
+                    self.assertFalse(saved.execute("SELECT 1 FROM sqlite_master WHERE name='parent_students'").fetchone())
+                    version_five_backups += 1
+            finally:
+                saved.close()
+        self.assertEqual(version_five_backups, 1)
 
     def test_legacy_missing_config_and_nan_render_without_crash(self):
         self.make_legacy()

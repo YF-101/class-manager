@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def connect(path):
@@ -51,6 +51,16 @@ def backup_database(path, directory):
     return target
 
 
+def init_parent_links(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS parent_students (
+        parent_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        PRIMARY KEY(parent_id,student_id))''')
+    conn.execute('CREATE INDEX IF NOT EXISTS parent_students_student ON parent_students(student_id)')
+    conn.execute('''INSERT OR IGNORE INTO parent_students(parent_id,student_id)
+        SELECT u.id,u.student_id FROM users u JOIN students s ON s.id=u.student_id WHERE u.role='parent' ''')
+
+
 def init_database(path, backup_dir, instance_dir, initial_password=None):
     """Additive migration, with backup before changing an existing database."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +85,12 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
             if conn.execute('SELECT version FROM schema_meta').fetchone()[0] == SCHEMA_VERSION:
                 conn.rollback()
                 return
+        if version == 5:
+            # Only add associations: preserve accounts, hashes, sessions and reset tokens.
+            init_parent_links(conn)
+            conn.execute('UPDATE schema_meta SET version=?', (SCHEMA_VERSION,))
+            conn.commit()
+            return
         definitions = [
             "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, email TEXT, role TEXT NOT NULL DEFAULT 'teacher', student_id INTEGER)",
             'CREATE TABLE IF NOT EXISTS classes (id INTEGER PRIMARY KEY AUTOINCREMENT, teacher_id INTEGER NOT NULL, name TEXT NOT NULL, grade TEXT, school_year TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL DEFAULT 0, UNIQUE(teacher_id,name))',
@@ -176,6 +192,7 @@ def init_database(path, backup_dir, instance_dir, initial_password=None):
                   OR (NEW.status='recorded' AND (NEW.score IS NULL OR typeof(NEW.score) NOT IN ('integer','real') OR NEW.score < 0 OR NEW.score >= 1e308))
                   OR (NEW.status='absent' AND NEW.score IS NOT NULL)
                 BEGIN SELECT RAISE(ABORT, 'invalid score'); END''')
+        init_parent_links(conn)
         conn.execute('CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL)')
         conn.execute('DELETE FROM schema_meta')
         conn.execute('INSERT INTO schema_meta VALUES(?)', (SCHEMA_VERSION,))

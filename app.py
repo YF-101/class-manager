@@ -165,7 +165,10 @@ def is_admin():
 
 
 def get_my_student(conn, sid):
-    if g.user['role'] in ('student', 'parent'):
+    if g.user['role'] == 'parent':
+        return conn.execute('''SELECT s.* FROM students s JOIN parent_students p ON p.student_id=s.id
+            WHERE s.id=? AND p.parent_id=?''', (sid, g.user['id'])).fetchone()
+    if g.user['role'] == 'student':
         return conn.execute('SELECT * FROM students WHERE id=? AND id=?', (sid, g.user['student_id'])).fetchone()
     if is_admin():
         return conn.execute('SELECT * FROM students WHERE id=?', (sid,)).fetchone()
@@ -542,7 +545,13 @@ def enable_user(uid):
 @app.route('/')
 @login_required
 def index():
-    if g.user['role'] in ('student', 'parent'):
+    if g.user['role'] == 'parent':
+        with database() as conn:
+            children = parent_children(conn, g.user['id'])
+        if len(children) == 1:
+            return redirect(url_for('student_page', sid=children[0]['id']))
+        return render_template('parent_children.html', children=children)
+    if g.user['role'] == 'student':
         if g.user['student_id'] is None:
             abort(403, description='账号尚未绑定学生档案，请联系老师。')
         return redirect(url_for('student_page', sid=g.user['student_id']))
@@ -663,7 +672,8 @@ def edit_student(sid):
                 return redirect(url_for('index', class_id=target['id']))
         classes = own_classes(conn)
         account = conn.execute("SELECT id,email,active FROM users WHERE student_id=? AND role='student'", (sid,)).fetchone()
-        parent_accounts = conn.execute("SELECT id,email,active FROM users WHERE student_id=? AND role='parent' ORDER BY id", (sid,)).fetchall()
+        parent_accounts = conn.execute('''SELECT u.id,u.email,u.active FROM users u
+            JOIN parent_students p ON p.parent_id=u.id WHERE p.student_id=? AND u.role='parent' ORDER BY u.id''', (sid,)).fetchall()
     return render_template('edit_student.html', student=student, classes=classes, account=account,
                            parent_accounts=parent_accounts, error=error)
 
@@ -703,22 +713,55 @@ def create_parent_account(sid):
     password = request.form.get('password', '')
     with database(write=True) as conn:
         student = require_student(conn, sid)
+        existing = conn.execute('SELECT * FROM users WHERE lower(email)=?', (email,)).fetchone()
         if not valid_email(email):
             flash('请输入正确的家长邮箱。')
+        elif existing:
+            if existing['role'] != 'parent':
+                flash('该邮箱已被其他类型账号使用。')
+            elif not existing['active']:
+                flash('该家长账号已停用，请联系管理员恢复后再关联。')
+            elif conn.execute('SELECT 1 FROM parent_students WHERE parent_id=? AND student_id=?', (existing['id'],sid)).fetchone():
+                flash('该家长已经关联这名学生。')
+            else:
+                conn.execute('INSERT INTO parent_students(parent_id,student_id) VALUES(?,?)', (existing['id'],sid))
+                conn.execute('UPDATE users SET student_id=COALESCE(student_id,?) WHERE id=?', (sid,existing['id']))
+                flash('已关联已有家长账号，继续使用原密码登录。')
         elif password_error(password):
             flash(password_error(password))
-        elif conn.execute('SELECT 1 FROM users WHERE lower(email)=?', (email,)).fetchone():
-            flash('该邮箱已被其他账号使用。')
         else:
             username = f'parent_{sid}'
             suffix = 1
             while conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
                 suffix += 1
                 username = f'parent_{sid}_{suffix}'
-            conn.execute('''INSERT INTO users(username,password,email,role,student_id,must_change_password)
+            uid = conn.execute('''INSERT INTO users(username,password,email,role,student_id,must_change_password)
                             VALUES(?,?,?,?,?,1)''',
-                         (username, generate_password_hash(password), email, 'parent', student['id']))
+                         (username, generate_password_hash(password), email, 'parent', student['id'])).lastrowid
+            conn.execute('INSERT INTO parent_students(parent_id,student_id) VALUES(?,?)', (uid,sid))
             flash('家长账号已创建，首次登录需要修改密码。')
+    return redirect(url_for('edit_student', sid=sid))
+
+
+def parent_children(conn, uid):
+    return conn.execute('''SELECT s.id,s.name,s.student_code,c.name class_name FROM students s
+        JOIN parent_students p ON p.student_id=s.id LEFT JOIN classes c ON c.id=s.class_id
+        WHERE p.parent_id=? ORDER BY s.id''', (uid,)).fetchall()
+
+
+@app.route('/student/<int:sid>/parent-account/<int:uid>/unlink', methods=['POST'])
+@login_required
+def unlink_parent_account(sid, uid):
+    with database(write=True) as conn:
+        require_student(conn, sid)
+        parent = conn.execute("SELECT id,student_id FROM users WHERE id=? AND role='parent'", (uid,)).fetchone()
+        if not parent or not conn.execute('SELECT 1 FROM parent_students WHERE parent_id=? AND student_id=?', (uid,sid)).fetchone():
+            abort(404, description='没有这条家长与学生的关联。')
+        conn.execute('DELETE FROM parent_students WHERE parent_id=? AND student_id=?', (uid,sid))
+        if parent['student_id'] == sid:
+            first = conn.execute('SELECT MIN(student_id) FROM parent_students WHERE parent_id=?', (uid,)).fetchone()[0]
+            conn.execute('UPDATE users SET student_id=? WHERE id=?', (first,uid))
+    flash('已解除与这名学生的关联，家长账号保留，其他孩子不受影响。')
     return redirect(url_for('edit_student', sid=sid))
 
 
@@ -968,11 +1011,12 @@ def student_page(sid):
         rows = get_student_scores(conn, sid)
         # Keep scored exams after a class move, without exposing unrelated classes.
         exams = [dict(id=e['id'], name=e['name']) for e in student_exams(conn, student)]
+        children = parent_children(conn, g.user['id']) if g.user['role'] == 'parent' else []
     chart = {}
     for row in rows:
         if row['valid'] and row['status'] == 'recorded':
             chart.setdefault(row['subject'], {})[str(row['exam_id'])] = round(row['score'] / row['max_score'] * 100, 2)
-    return render_template('student.html', stu=student, rows=rows, all_exams=exams, chart=chart,
+    return render_template('student.html', stu=student, rows=rows, all_exams=exams, chart=chart, children=children,
                            student_view=g.user['role'] in ('student', 'parent'),
                            print_date=datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d'))
 
@@ -1181,10 +1225,20 @@ def summary():
 def delete_student(sid):
     with database(write=True) as conn:
         require_student(conn, sid)
-        accounts = conn.execute('SELECT email FROM users WHERE student_id=?', (sid,)).fetchall()
+        parents = conn.execute('SELECT parent_id FROM parent_students WHERE student_id=?', (sid,)).fetchall()
+        conn.execute('DELETE FROM parent_students WHERE student_id=?', (sid,))
+        for parent in parents:
+            uid = parent['parent_id']
+            first = conn.execute('SELECT MIN(student_id) FROM parent_students WHERE parent_id=?', (uid,)).fetchone()[0]
+            if first is None:
+                conn.execute('DELETE FROM reset_tokens WHERE lower(email) IN (SELECT lower(email) FROM users WHERE id=?)', (uid,))
+                conn.execute('DELETE FROM users WHERE id=?', (uid,))
+            else:
+                conn.execute('UPDATE users SET student_id=? WHERE id=?', (first,uid))
+        accounts = conn.execute("SELECT email FROM users WHERE student_id=? AND role='student'", (sid,)).fetchall()
         for account in accounts:
             conn.execute('DELETE FROM reset_tokens WHERE lower(email)=lower(?)', (account['email'],))
-        conn.execute('DELETE FROM users WHERE student_id=?', (sid,))
+        conn.execute("DELETE FROM users WHERE student_id=? AND role='student'", (sid,))
         conn.execute('DELETE FROM scores WHERE student_id=?', (sid,))
         conn.execute('DELETE FROM students WHERE id=?', (sid,))
     return redirect(url_for('index'))

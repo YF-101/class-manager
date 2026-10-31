@@ -31,16 +31,20 @@
   <h2>家长登录账号</h2>
   {% if parent_accounts %}
   <div class="table-scroll"><table>
-    <thead><tr><th>登录邮箱</th><th>状态</th></tr></thead>
-    <tbody>{% for parent in parent_accounts %}<tr><td>{{ parent.email }}</td><td>{% if parent.active %}正常{% else %}已停用{% endif %}</td></tr>{% endfor %}</tbody>
+    <thead><tr><th>登录邮箱</th><th>状态</th><th>操作</th></tr></thead>
+    <tbody>{% for parent in parent_accounts %}<tr><td>{{ parent.email }}</td><td>{% if parent.active %}正常{% else %}已停用{% endif %}</td><td>
+      <form action="{{ url_for('unlink_parent_account', sid=student.id, uid=parent.id) }}" method="post" onsubmit="return confirm('解除这位家长与本学生的关联？家长账号和其他孩子的关联会保留。');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-delete">解除关联</button>
+      </form>
+    </td></tr>{% endfor %}</tbody>
   </table></div>
   {% endif %}
   <form action="/student/{{ student.id }}/parent-account" method="post" style="display:grid;gap:12px;max-width:520px;{% if parent_accounts %}margin-top:16px;{% endif %}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label>家长邮箱<input type="email" name="email" autocomplete="email" required placeholder="用于家长登录和找回密码"></label>
-    <label>初始密码<input type="password" name="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
-    <button class="btn btn-green">添加家长账号</button>
+    <label>新账号初始密码（已有家长账号请留空）<input type="password" name="password" autocomplete="new-password" minlength="8" maxlength="128"></label>
+    <button class="btn btn-green">创建或关联家长账号</button>
   </form>
-  <p class="muted" style="margin-top:12px;">可以为一名学生添加多个家长邮箱；家长只能查看该学生的成绩。</p>
+  <p class="muted" style="margin-top:12px;">同一学生可关联多个家长，一个家长邮箱也可关联多个孩子。新账号需设置至少8位初始密码，首次登录需修改；已有家长账号继续使用原密码。家长只能查看已关联孩子的成绩。</p>
 </div>
 {% endblock %}

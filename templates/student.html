@@ -1,5 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
+{% if children|length > 1 %}
+<div class="card no-print">
+  <h2>切换孩子</h2>
+  <p style="display:flex;gap:12px;flex-wrap:wrap;">{% for child in children %}
+    {% if child.id == stu.id %}<strong>{{ child.name }} · {{ child.class_name or '未分班' }}</strong>{% else %}<a href="{{ url_for('student_page', sid=child.id) }}">{{ child.name }} · {{ child.class_name or '未分班' }}</a>{% endif %}
+  {% endfor %}</p>
+</div>
+{% endif %}
 
 <div class="card">
   <h2>📊 {% if stu.student_code %}{{ stu.student_code }} · {% endif %}{{ stu.name }} 的成绩</h2>
