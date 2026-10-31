@@ -156,7 +156,7 @@ button, .btn, .navbtn { white-space:nowrap; }
       <a href="/users" class="navbtn">👤 用户管理</a>
       {% endif %}
       <span style="margin-left:auto; color:#c9d8ff; font-size:13px;">
-        👤 {{ session.user }}
+        👤 {{ session.user }} · {{ {'admin':'管理员','teacher':'老师','student':'学生','parent':'家长'}.get(g.user.role, '') }}
         <form action="/logout" method="post" style="display:inline">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="navbtn" style="border:0;background:rgba(220,38,38,.85);cursor:pointer">退出</button></form>
       </span>

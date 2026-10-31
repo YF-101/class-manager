@@ -11,6 +11,7 @@
     <a href="/classes" class="btn btn-blue" style="display:inline-block;">管理班级</a>
   </form>
   <h2>➕ 添加学生</h2>
+  <p style="margin-bottom:12px;"><a href="{{ url_for('import_students', class_id=cur_class.id) }}">📥 Excel 批量导入学生</a></p>
   <form action="/add" method="post" style="display:flex; gap:10px;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="class_id" value="{{ cur_class.id }}">

@@ -68,8 +68,8 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
   <form action="/login" method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="field">
-      <label>邮箱</label>
-      <input autocomplete="username" type="email" name="email" placeholder="请输入注册邮箱" autofocus>
+      <label>邮箱或旧账号用户名</label>
+      <input autocomplete="username" type="text" name="email" autocapitalize="none" spellcheck="false" placeholder="请输入邮箱，旧账号可填用户名" autofocus>
     </div>
     <div class="field">
       <label>密码</label>
@@ -78,6 +78,7 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
     <button class="btn">登 录</button>
   </form>
   <p class="hint">尚未登记邮箱的旧账号，可暂时使用用户名登录并联系管理员补充邮箱。</p>
+  <p class="hint">老师、学生和家长共用此登录页。学生与家长账号由老师在学生档案页创建，登录后自动进入对应成绩页面。</p>
 
   <p class="links">
     <a href="/register">📝 注册新账号</a>

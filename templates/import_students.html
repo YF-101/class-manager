@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>📥 批量导入学生 · {{ cur_class.name }}</h2>
+  <p style="line-height:1.8;margin-bottom:14px;">先上传预览，确认后才会保存。每次最多500人，文件小于1MB。仅读取第一个工作表，第一行为“姓名”和可选“学号”；学号建议设为文本，保留开头的0。</p>
+  <p style="margin-bottom:14px;"><a href="{{ url_for('student_import_template') }}">下载空白 Excel 模板</a> ｜ <a href="{{ url_for('index', class_id=cur_class.id) }}">返回班级名单</a></p>
+  {% if error %}<p class="message" role="alert">{{ error }}</p>{% endif %}
+  <form action="{{ url_for('import_students') }}" method="post" enctype="multipart/form-data" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="class_id" value="{{ cur_class.id }}">
+    <label>学生名单文件 <input type="file" name="file" accept=".xlsx" required></label>
+    <button class="btn btn-blue">上传并预览</button>
+  </form>
+</div>
+{% if rows %}
+<div class="card">
+  <h2>导入预览（{{ rows|length }} 人，{{ error_count }} 行有错误）</h2>
+  {% if error_count %}<p class="message" role="alert">尚未导入任何学生。请修正下面的错误行，再重新上传文件。</p>{% else %}<p class="message">校验通过。请核对目标班级和名单，预览30分钟内有效。</p>{% endif %}
+  <div class="table-scroll"><table>
+    <thead><tr><th>Excel 行号</th><th>姓名</th><th>学号</th><th>检查结果</th></tr></thead>
+    <tbody>{% for row in rows %}<tr>
+      <td>{{ row.line }}</td><td>{{ row.name }}</td><td>{{ row.student_code or '—' }}</td>
+      <td class="{% if row.errors %}fail{% endif %}">{{ row.errors|join('；') if row.errors else '通过' }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% if preview_token %}
+  <form action="{{ url_for('import_students') }}" method="post" style="margin-top:16px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="confirm">
+    <input type="hidden" name="preview_token" value="{{ preview_token }}">
+    <button class="btn btn-green">确认导入{{ rows|length }}名学生到「{{ cur_class.name }}」</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -22,7 +22,7 @@ os.environ.update(CLASS_MANAGER_DB=str(Path(_boot.name)/'boot.db'), CLASS_MANAGE
 import app as site
 from database import init_database, backup_database
 from werkzeug.security import generate_password_hash, check_password_hash
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 from flask import template_rendered
 
 
@@ -336,6 +336,142 @@ class SiteTests(unittest.TestCase):
         self.assertEqual((row['name'],row['student_code']),('学生甲改名','A100'))
         self.assertEqual(self.b.get(f'/edit_student/{sid}').status_code,404)
 
+    def roster_file(self, rows, headers=('姓名', '学号')):
+        wb = Workbook()
+        wb.active.append(list(headers))
+        for row in rows:
+            wb.active.append(list(row))
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    def roster_preview(self, rows, client=None, cid=None, headers=('姓名', '学号')):
+        cid = cid or self.sql('SELECT class_id FROM students WHERE id=?', (self.sa,))[0][0]
+        return self.post(client or self.a, '/students/import',
+                         {'class_id':cid, 'file':(self.roster_file(rows, headers), 'roster.xlsx')})
+
+    def preview_token(self, response):
+        match = re.search(r'name="preview_token" value="([^"]+)"', response.text)
+        return match[1] if match else None
+
+    def test_import_preview_then_atomic_confirm_and_replay(self):
+        page = self.roster_preview([('新学生甲','001'), ('新学生乙','002')])
+        self.assertEqual(page.status_code, 200)
+        self.assertFalse(self.sql("SELECT 1 FROM students WHERE name='新学生甲'"))
+        token = self.preview_token(page)
+        self.assertTrue(token)
+        result = self.post(self.a, '/students/import', {'action':'confirm','preview_token':token})
+        self.assertEqual(result.status_code, 302)
+        created = self.sql("SELECT * FROM students WHERE name LIKE '新学生%' ORDER BY id")
+        self.assertEqual([r['student_code'] for r in created], ['001','002'])
+        original = self.sql('SELECT teacher_id,class_id FROM students WHERE id=?', (self.sa,))[0]
+        self.assertTrue(all((r['teacher_id'],r['class_id']) == tuple(original) for r in created))
+        again = self.post(self.a, '/students/import', {'action':'confirm','preview_token':token})
+        self.assertIn('已导入', again.text)
+        self.assertEqual(len(self.sql("SELECT id FROM students WHERE name LIKE '新学生%'")), 2)
+
+    def test_import_all_error_rows_reported_without_writing(self):
+        self.sql('UPDATE students SET student_code=? WHERE id=?', ('001',self.sa))
+        page = self.roster_preview([('学生甲','001'), ('新学生','002'), ('新学生','002'), ('','003'), ('超长学号','x'*51), ('=1+1','004')])
+        for message in ['已有同名','已有相同学号','与第3行重复','姓名需为','学号不能超过','不能使用公式']:
+            self.assertIn(message, page.text)
+        self.assertIsNone(self.preview_token(page))
+        self.assertEqual(len(self.sql('SELECT id FROM students')), 3)
+
+    def test_import_rechecks_roster_changes_before_confirm(self):
+        token = self.preview_token(self.roster_preview([('待导入甲','010'),('待导入乙','011')]))
+        self.post(self.a, '/add', {'name':'另一个人','student_code':'011'})
+        page = self.post(self.a, '/students/import', {'action':'confirm','preview_token':token})
+        self.assertIn('名单已变化', page.text)
+        self.assertFalse(self.sql("SELECT 1 FROM students WHERE name='待导入甲'"))
+
+    def test_import_permission_token_tamper_expiry_and_changed_session(self):
+        cid = self.sql('SELECT class_id FROM students WHERE id=?', (self.sa,))[0][0]
+        self.assertEqual(self.b.get(f'/students/import?class_id={cid}').status_code, 404)
+        self.assertEqual(self.roster_preview([('无权限','001')], client=self.b, cid=cid).status_code, 404)
+        token = self.preview_token(self.roster_preview([('隔离测试','001')]))
+        data = {'action':'confirm','preview_token':token}
+        self.assertEqual(self.post(self.b, '/students/import', data).status_code, 403)
+        self.assertEqual(self.post(self.a, '/students/import', {**data,'preview_token':token+'x'}).status_code, 400)
+        from itsdangerous import URLSafeTimedSerializer
+        signer = URLSafeTimedSerializer(site.app.secret_key, salt='student-import-v1')
+        payload = signer.loads(token)
+        with patch('itsdangerous.timed.time.time', return_value=time.time()-1801):
+            expired = signer.dumps(payload)
+        self.assertEqual(self.post(self.a, '/students/import', {**data,'preview_token':expired}).status_code, 400)
+        self.post(self.a, '/change_password', {'old_password':'TeacherPass123!',
+                  'new_password':'ChangedTeacher123!','confirm_password':'ChangedTeacher123!'})
+        self.assertEqual(self.post(self.a, '/students/import', data).status_code, 403)
+        self.assertFalse(self.sql("SELECT 1 FROM students WHERE name='隔离测试'"))
+
+    def test_import_template_formats_codes_as_text(self):
+        response = self.a.get('/students/import-template')
+        self.assertEqual(response.status_code, 200)
+        wb = load_workbook(io.BytesIO(response.data))
+        self.assertEqual([c.value for c in wb.active[1]], ['姓名','学号'])
+        self.assertEqual(wb.active['B2'].number_format, '@')
+        self.assertIsNone(wb.active['A2'].value)
+
+    def test_import_class_binding_and_duplicate_codes_in_other_class(self):
+        original_class = self.sql('SELECT class_id FROM students WHERE id=?', (self.sa,))[0][0]
+        self.post(self.a, '/create_class', {'name':'导入二班'})
+        other_class = self.sql("SELECT id FROM classes WHERE name='导入二班'")[0][0]
+        self.post(self.a, '/add', {'name':'相同姓名','student_code':'001','class_id':other_class})
+        token = self.preview_token(self.roster_preview([('相同姓名','001')]))
+        self.assertTrue(token)
+        page = self.post(self.a, '/students/import',
+                         {'action':'confirm','preview_token':token,'class_id':other_class})
+        self.assertEqual(page.status_code, 302)
+        rows = self.sql("SELECT class_id FROM students WHERE name='相同姓名'")
+        self.assertEqual({r[0] for r in rows}, {original_class,other_class})
+
+    def test_import_file_headers_limits_and_corrupt_files(self):
+        for rows, headers, expected in [([], ('姓名','学号'), '没有可导入'),
+                                       ([('甲','1')], ('名字','学号'), '第一行'),
+                                       ([('甲','1')], ('姓名','姓名'), '第一行'),
+                                       ([(f'学生{i}',str(i)) for i in range(501)], ('姓名','学号'), '最多导入500')]:
+            self.assertIn(expected, self.roster_preview(rows, headers=headers).text)
+        for filename in ['bad.xlsx','old.xls']:
+            page = self.post(self.a, '/students/import', {'file':(io.BytesIO(b'not an excel file'), filename)})
+            self.assertEqual(page.status_code, 200)
+            self.assertIsNone(self.preview_token(page))
+        page = self.post(self.a, '/students/import', {'file':(io.BytesIO(b'x'*(1024*1024)), 'large.xlsx')})
+        self.assertEqual(page.status_code, 413)
+        self.assertIn('1MB', page.text)
+        from zipfile import ZipFile, ZIP_DEFLATED
+        oversized = io.BytesIO()
+        with ZipFile(oversized, 'w', compression=ZIP_DEFLATED) as archive:
+            archive.writestr('large.xml', b'x'*(8*1024*1024+1))
+        oversized.seek(0)
+        page = self.post(self.a, '/students/import', {'file':(oversized, 'expanded.xlsx')})
+        self.assertIn('内容过大', page.text)
+
+    def test_import_numeric_codes_preserve_zero_format_and_optional_codes(self):
+        from student_import import parse_roster
+        wb = Workbook()
+        wb.active.append(['学号','姓名'])
+        wb.active.append([12,'带前导零'])
+        wb.active['A2'].number_format = '00000'
+        buf = io.BytesIO(); wb.save(buf)
+        self.assertEqual(parse_roster(buf.getvalue())[0]['student_code'], '00012')
+        page = self.roster_preview([('只有姓名',)], headers=('姓名',))
+        self.assertTrue(self.preview_token(page))
+
+    def test_summary_and_export_exclude_other_classes_but_keep_scored_history(self):
+        self.save(score=88)
+        self.post(self.a, '/create_class', {'name':'二班'})
+        cid = self.sql("SELECT id FROM classes WHERE name='二班'")[0][0]
+        self.post(self.a, '/add', {'name':'其他班学生','class_id':cid})
+        context = self.summary()
+        self.assertEqual({s['id'] for s in context['students']}, {self.sa,self.s2})
+        self.assertEqual(context['statistics'][0]['expected'], 2)
+        self.post(self.a, f'/edit_student/{self.sa}', {'name':'学生甲','class_id':cid})
+        self.assertEqual({s['id'] for s in self.summary()['students']}, {self.sa,self.s2})
+        exported = load_workbook(io.BytesIO(self.a.get('/export_excel').data))
+        names = {r[0] for r in list(exported.active.values)[1:]}
+        self.assertEqual(names, {'学生甲','学生乙'})
+
     def test_student_account_sees_only_own_scores(self):
         self.save(score=91)
         response=self.post(self.a,f'/student/{self.sa}/account',{'email':'student@example.invalid','password':'StudentPass123!'})
@@ -349,7 +485,7 @@ class SiteTests(unittest.TestCase):
         self.assertIn('91',own.text)
         self.assertNotIn('继续录成绩',own.text)
         self.assertEqual(student.get(f'/student/{self.s2}').status_code,404)
-        for path in ['/classes','/exams','/summary','/export_excel',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
+        for path in ['/classes','/exams','/summary','/export_excel','/students/import','/students/import-template',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
             self.assertEqual(student.get(path).status_code,403,path)
 
     def test_student_account_requires_unique_email_and_single_binding(self):
@@ -377,7 +513,7 @@ class SiteTests(unittest.TestCase):
         self.assertIn('88', own.text)
         self.assertNotIn('继续录成绩', own.text)
         self.assertEqual(parent.get(f'/student/{self.s2}').status_code, 404)
-        for path in ['/classes','/exams','/summary','/export_excel',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
+        for path in ['/classes','/exams','/summary','/export_excel','/students/import','/students/import-template',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
             self.assertEqual(parent.get(path).status_code, 403, path)
 
     def test_family_chart_excludes_unrelated_class_exams_and_keeps_history(self):
@@ -422,6 +558,7 @@ class SiteTests(unittest.TestCase):
                                    (f'/score/{self.sa}', {'exam_id':self.ea,'subject':'语文','score':99}),
                                    (f'/edit_score/{score_id}', {'score':99}),
                                    (f'/delete_score/{score_id}', {}),
+                                   ('/students/import', {'action':'confirm','preview_token':'forged'}),
                                    (f'/delete_exam/{self.ea}', {})]:
                     self.assertEqual(self.post(family, path, data).status_code, 403, path)
                 self.assertEqual(self.sql('SELECT score FROM scores WHERE id=?', (score_id,))[0][0], 88)

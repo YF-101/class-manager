@@ -22,7 +22,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
+from itsdangerous import URLSafeTimedSerializer, BadData
 from database import transaction, init_database, default_subjects, finite_number
+from student_import import parse_roster, validate_roster
 
 BASE_DIR = Path(__file__).resolve().parent
 # Load before constructing the application, including SECRET_KEY.
@@ -127,9 +129,11 @@ def response_headers(response):
 @app.errorhandler(400)
 @app.errorhandler(403)
 @app.errorhandler(404)
+@app.errorhandler(413)
 @app.errorhandler(429)
 def request_error(error):
-    return render_template('error.html', code=error.code, message=error.description), error.code
+    message = '上传内容过大，请使用小于1MB的 Excel 文件。' if error.code == 413 else error.description
+    return render_template('error.html', code=error.code, message=message), error.code
 
 
 @app.errorhandler(500)
@@ -570,6 +574,70 @@ def add_student():
     return redirect(url_for('index', class_id=request.form.get('class_id') or ''))
 
 
+@app.route('/students/import-template')
+@login_required
+def student_import_template():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = '学生名单'
+    ws.append(['姓名', '学号'])
+    ws.column_dimensions['A'].width = 24
+    ws.column_dimensions['B'].width = 24
+    ws.freeze_panes = 'A2'
+    for row in ws.iter_rows(min_row=2, max_row=501, max_col=2):
+        for cell in row:
+            cell.number_format = '@'
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name='学生导入模板.xlsx',
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+@app.route('/students/import', methods=['GET', 'POST'])
+@login_required
+def import_students():
+    error, rows, token = None, [], None
+    signer = URLSafeTimedSerializer(app.secret_key, salt='student-import-v1')
+    if request.method == 'POST' and request.form.get('action') == 'confirm':
+        try:
+            payload = signer.loads(request.form.get('preview_token', ''), max_age=1800)
+        except BadData:
+            abort(400, description='导入预览已过期或无效，请重新上传文件。')
+        if payload['uid'] != g.user['id'] or payload['version'] != g.user['session_version']:
+            abort(403, description='此导入预览不属于当前登录账号，请重新上传文件。')
+        with database(write=True) as conn:
+            cur_class = requested_class(conn, payload['class_id'])
+            existing = conn.execute('SELECT name,student_code FROM students WHERE class_id=?', (cur_class['id'],)).fetchall()
+            rows = validate_roster(payload['rows'], existing)
+            if any(r['errors'] for r in rows):
+                error = '班级名单已变化或此批学生已导入，请检查错误后重新上传。'
+            else:
+                conn.executemany('INSERT INTO students(name,teacher_id,class_id,student_code) VALUES(?,?,?,?)',
+                                 [(r['name'], cur_class['teacher_id'], cur_class['id'], r['student_code'] or None) for r in rows])
+                flash(f'已成功导入{len(rows)}名学生。')
+                return redirect(url_for('index', class_id=cur_class['id']))
+    else:
+        with database() as conn:
+            cur_class = requested_class(conn, request.values.get('class_id'))
+        if request.method == 'POST':
+            upload = request.files.get('file')
+            try:
+                if not upload or not upload.filename.lower().endswith('.xlsx'):
+                    raise ValueError('请选择 .xlsx 格式的 Excel 文件，旧版 .xls 请另存为 .xlsx')
+                rows = parse_roster(upload.read())
+                with database() as conn:
+                    existing = conn.execute('SELECT name,student_code FROM students WHERE class_id=?', (cur_class['id'],)).fetchall()
+                rows = validate_roster(rows, existing)
+                if not any(r['errors'] for r in rows):
+                    token = signer.dumps(dict(uid=g.user['id'], version=g.user['session_version'],
+                                              class_id=cur_class['id'], rows=rows))
+            except ValueError as exc:
+                error = str(exc)
+    return render_template('import_students.html', cur_class=cur_class, rows=rows, error=error,
+                           preview_token=token, error_count=sum(bool(r['errors']) for r in rows))
+
+
 @app.route('/edit_student/<int:sid>', methods=['GET', 'POST'])
 @login_required
 def edit_student(sid):
@@ -935,7 +1003,9 @@ def build_summary(conn, exam):
     # Preserve legacy duplicates in storage, but count each subject only once.
     configs = {row['subject']: row for row in subjects}
     subjects = list(configs.values())
-    students = conn.execute('SELECT * FROM students WHERE teacher_id=? ORDER BY id', (exam['teacher_id'],)).fetchall()
+    students = conn.execute('''SELECT * FROM students st WHERE teacher_id=? AND (class_id=?
+        OR EXISTS (SELECT 1 FROM scores s WHERE s.student_id=st.id AND s.exam_id=?))
+        ORDER BY id''', (exam['teacher_id'], exam['class_id'], exam['id'])).fetchall()
     rows = conn.execute('''SELECT s.*,es.max_score,es.pass_score FROM scores s JOIN students st ON st.id=s.student_id
         LEFT JOIN exam_subjects es ON es.id=(SELECT MAX(id) FROM exam_subjects WHERE exam_id=s.exam_id AND subject=s.subject)
         WHERE s.exam_id=? AND st.teacher_id=? AND s.id=(SELECT MAX(sc.id) FROM scores sc WHERE sc.student_id=s.student_id AND sc.exam_id=s.exam_id AND sc.subject=s.subject)''', (exam['id'], exam['teacher_id'])).fetchall()
