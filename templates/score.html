@@ -9,6 +9,7 @@
 
 <div class="card">
   <h2>✏️ 为「{{ stu.name }}」录入成绩</h2>
+  {% if cur_exam %}<p style="margin-bottom:12px;"><a href="{{ url_for('class_scores', exam_id=cur_exam.id) }}">✏️ 切换到本场考试整班录分</a></p>{% endif %}
   <p style="font-size:13px; margin-bottom:12px;">
     选择考试：
     {% for e in all_exams %}

@@ -787,13 +787,32 @@ def get_student_scores(conn, sid):
     return [normalise_score(row) for row in rows]
 
 
-def require_pair(student, exam):
+def exam_students(conn, exam):
+    return conn.execute('''SELECT * FROM students st WHERE teacher_id=? AND (class_id=?
+        OR EXISTS (SELECT 1 FROM scores s WHERE s.student_id=st.id AND s.exam_id=?))
+        ORDER BY id''', (exam['teacher_id'], exam['class_id'], exam['id'])).fetchall()
+
+
+def student_exams(conn, student):
+    return conn.execute('''SELECT * FROM exams e WHERE teacher_id=? AND (class_id=?
+        OR EXISTS (SELECT 1 FROM scores s WHERE s.exam_id=e.id AND s.student_id=?))
+        ORDER BY id''', (student['teacher_id'], student['class_id'], student['id'])).fetchall()
+
+
+def require_pair(conn, student, exam):
     if student['teacher_id'] != exam['teacher_id']:
         abort(400, description='学生与考试必须属于同一位老师。')
+    if student['class_id'] != exam['class_id'] and not conn.execute(
+            'SELECT 1 FROM scores WHERE student_id=? AND exam_id=?', (student['id'], exam['id'])).fetchone():
+        abort(400, description='学生不属于这场考试的班级，且没有该场考试的历史成绩。')
 
 
 def parse_score(config):
     status = request.form.get('status', 'recorded')
+    return parse_score_value(config, request.form.get('score', '').strip(), status)
+
+
+def parse_score_value(config, raw, status='recorded'):
     if status == 'absent':
         return None, status
     if status != 'recorded':
@@ -802,10 +821,110 @@ def parse_score(config):
     passing = finite_number(config['pass_score'])
     if maximum <= 0 or not 0 <= passing <= maximum:
         raise ValueError('科目配置异常，请先修正满分和及格线')
-    score = finite_number(request.form.get('score', '').strip())
+    score = finite_number(raw)
     if not 0 <= score <= maximum:
         raise ValueError(f'请输入0至{num_filter(maximum)}分之间的成绩')
     return score, status
+
+
+def write_score(conn, student_id, exam, subject, value, status):
+    existing = conn.execute('SELECT id FROM scores WHERE student_id=? AND exam_id=? AND subject=? ORDER BY id DESC',
+                            (student_id, exam['id'], subject)).fetchall()
+    if status == 'missing':
+        conn.execute('DELETE FROM scores WHERE student_id=? AND exam_id=? AND subject=?', (student_id, exam['id'], subject))
+    elif existing:
+        conn.execute('UPDATE scores SET score=?,status=? WHERE id=?', (value, status, existing[0]['id']))
+        conn.execute('DELETE FROM scores WHERE student_id=? AND exam_id=? AND subject=? AND id!=?',
+                     (student_id, exam['id'], subject, existing[0]['id']))
+    else:
+        conn.execute('INSERT INTO scores(student_id,exam_id,subject,score,status,exam) VALUES(?,?,?,?,?,?)',
+                     (student_id, exam['id'], subject, value, status, exam['name']))
+
+
+@app.route('/exam/<int:exam_id>/scores', methods=['GET', 'POST'])
+@login_required
+def class_scores(exam_id):
+    page = request.args.get('page', type=int) if 'page' in request.args else 1
+    if page is None or page < 1:
+        abort(400, description='页码无效。')
+    error, cell_errors, values = None, {}, {}
+    can_save, status_code = True, 200
+    signer = URLSafeTimedSerializer(app.secret_key, salt='class-scores-v1')
+    with database(write=request.method == 'POST') as conn:
+        exam = require_exam(conn, exam_id)
+        class_row = conn.execute('SELECT name FROM classes WHERE id=?', (exam['class_id'],)).fetchone()
+        subjects = conn.execute('''SELECT * FROM exam_subjects es WHERE exam_id=? AND id=(
+            SELECT MAX(cfg.id) FROM exam_subjects cfg WHERE cfg.exam_id=es.exam_id AND cfg.subject=es.subject)
+            ORDER BY id''', (exam_id,)).fetchall()
+        roster = exam_students(conn, exam)
+        # Bound form size even for exams with many custom subjects.
+        page_size = max(1, min(30, 900 // max(1, len(subjects))))
+        pages = max(1, (len(roster) + page_size - 1) // page_size)
+        if page > pages:
+            abort(404, description='没有这一页学生，请返回考试重新打开录分表。')
+        students = roster[(page-1)*page_size:page*page_size]
+        ids = [s['id'] for s in students]
+        stored = conn.execute('SELECT * FROM scores WHERE exam_id=? AND student_id IN (' +
+                              ','.join('?' for _ in ids) + ') ORDER BY id', [exam_id]+ids).fetchall() if ids else []
+        latest = {(r['student_id'], r['subject']): r for r in stored}
+        for student in students:
+            for config in subjects:
+                key = f"cell_{student['id']}_{config['id']}"
+                row = latest.get((student['id'], config['subject']))
+                values[key] = '' if row is None else '缺考' if row['status'] == 'absent' else str(num_filter(row['score']))
+        original = values.copy()
+        state = dict(exam=dict(exam), roster=[dict(r) for r in roster],
+                     subjects=[dict(r) for r in subjects], scores=[dict(r) for r in stored])
+        digest = hashlib.sha256(json.dumps(state, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        if request.method == 'POST':
+            try:
+                snapshot = signer.loads(request.form.get('snapshot', ''), max_age=3600)
+            except BadData:
+                abort(400, description='录分页面已过期或无效，请重新打开录分表。')
+            if (snapshot['uid'], snapshot['version'], snapshot['exam'], snapshot['page']) != (
+                    g.user['id'], g.user['session_version'], exam_id, page):
+                abort(403, description='此录分页面不属于当前账号或考试，请重新打开。')
+            values.update({k: request.form[k] for k in values if k in request.form})
+            if snapshot['digest'] != digest:
+                error = '成绩、名单或科目配置已被修改，本次没有保存。请先复制需要保留的输入，再重新加载最新数据。'
+                can_save, status_code = False, 409
+            else:
+                submitted = {k for k in request.form if k.startswith('cell_')}
+                if submitted != set(original) or any(len(request.form.getlist(k)) != 1 for k in original):
+                    abort(400, description='录分表不完整或包含无权修改的单元格，请重新打开页面。')
+                changes = []
+                for student in students:
+                    for config in subjects:
+                        key = f"cell_{student['id']}_{config['id']}"
+                        raw = values[key].strip()
+                        if raw == original[key]:
+                            continue
+                        try:
+                            if len(raw) > 64:
+                                raise ValueError('成绩内容过长')
+                            value, status = (None, 'missing') if not raw else parse_score_value(
+                                config, raw, 'absent' if raw == '缺考' else 'recorded')
+                            changes.append((student['id'], config['subject'], value, status))
+                        except ValueError as exc:
+                            cell_errors[key] = str(exc)
+                if cell_errors:
+                    error = f'有{len(cell_errors)}个单元格需要修正，本次没有保存任何修改。'
+                    status_code = 400
+                elif not students or not subjects:
+                    error, status_code = '请先添加学生并配置考试科目。', 400
+                else:
+                    for sid, subject, value, status in changes:
+                        write_score(conn, sid, exam, subject, value, status)
+                    flash(f'本页已保存，共修改{len(changes)}条成绩。' if changes else '本页没有需要保存的修改。')
+                    remaining = len(exam_students(conn, exam))
+                    last_page = max(1, (remaining+page_size-1)//page_size)
+                    return redirect(url_for('class_scores', exam_id=exam_id, page=min(page, last_page)))
+        snapshot_token = signer.dumps(dict(uid=g.user['id'], version=g.user['session_version'],
+                                           exam=exam_id, page=page, digest=digest)) if can_save else None
+    return render_template('class_scores.html', exam=exam, class_name=class_row['name'] if class_row else '历史班级',
+                           subjects=subjects, students=students, values=values, cell_errors=cell_errors,
+                           error=error, snapshot=snapshot_token, page=page, pages=pages,
+                           total=len(roster), page_size=page_size), status_code
 
 
 @app.route('/score/<int:sid>', methods=['GET', 'POST'])
@@ -814,7 +933,7 @@ def score_page(sid):
     error = None
     with database(write=request.method == 'POST') as conn:
         student = require_student(conn, sid)
-        exams = [e for e in own_exams(conn) if e['teacher_id'] == student['teacher_id']]
+        exams = student_exams(conn, student)
         eid = request.values.get('exam_id', type=int)
         if 'exam_id' in request.values and eid is None:
             abort(400, description='考试编号无效。')
@@ -822,7 +941,7 @@ def score_page(sid):
             eid = exams[0]['id']
         exam = require_exam(conn, eid) if eid is not None else None
         if exam:
-            require_pair(student, exam)
+            require_pair(conn, student, exam)
         subs = conn.execute('SELECT * FROM exam_subjects WHERE exam_id=? ORDER BY id', (eid,)).fetchall()
         if request.method == 'POST':
             subject = request.form.get('subject', '').strip()
@@ -834,12 +953,7 @@ def score_page(sid):
             except ValueError as exc:
                 error = str(exc)
             else:
-                existing = conn.execute('SELECT id FROM scores WHERE student_id=? AND exam_id=? AND subject=? ORDER BY id DESC', (sid, eid, subject)).fetchall()
-                if existing:
-                    conn.execute('UPDATE scores SET score=?,status=? WHERE id=?', (value, status, existing[0]['id']))
-                    conn.execute('DELETE FROM scores WHERE student_id=? AND exam_id=? AND subject=? AND id!=?', (sid, eid, subject, existing[0]['id']))
-                else:
-                    conn.execute('INSERT INTO scores(student_id,exam_id,subject,score,status,exam) VALUES(?,?,?,?,?,?)', (sid, eid, subject, value, status, exam['name']))
+                write_score(conn, sid, exam, subject, value, status)
                 flash('成绩已保存。')
                 return redirect(url_for('score_page', sid=sid, exam_id=eid))
         rows = get_student_scores(conn, sid)
@@ -853,10 +967,7 @@ def student_page(sid):
         student = require_student(conn, sid)
         rows = get_student_scores(conn, sid)
         # Keep scored exams after a class move, without exposing unrelated classes.
-        exams = [dict(e) for e in conn.execute('''SELECT id,name FROM exams e
-            WHERE e.teacher_id=? AND (e.class_id=? OR EXISTS (
-                SELECT 1 FROM scores s WHERE s.exam_id=e.id AND s.student_id=?))
-            ORDER BY e.id''', (student['teacher_id'], student['class_id'], sid)).fetchall()]
+        exams = [dict(id=e['id'], name=e['name']) for e in student_exams(conn, student)]
     chart = {}
     for row in rows:
         if row['valid'] and row['status'] == 'recorded':
@@ -1003,9 +1114,7 @@ def build_summary(conn, exam):
     # Preserve legacy duplicates in storage, but count each subject only once.
     configs = {row['subject']: row for row in subjects}
     subjects = list(configs.values())
-    students = conn.execute('''SELECT * FROM students st WHERE teacher_id=? AND (class_id=?
-        OR EXISTS (SELECT 1 FROM scores s WHERE s.student_id=st.id AND s.exam_id=?))
-        ORDER BY id''', (exam['teacher_id'], exam['class_id'], exam['id'])).fetchall()
+    students = exam_students(conn, exam)
     rows = conn.execute('''SELECT s.*,es.max_score,es.pass_score FROM scores s JOIN students st ON st.id=s.student_id
         LEFT JOIN exam_subjects es ON es.id=(SELECT MAX(id) FROM exam_subjects WHERE exam_id=s.exam_id AND subject=s.subject)
         WHERE s.exam_id=? AND st.teacher_id=? AND s.id=(SELECT MAX(sc.id) FROM scores sc WHERE sc.student_id=s.student_id AND sc.exam_id=s.exam_id AND sc.subject=s.subject)''', (exam['id'], exam['teacher_id'])).fetchall()
@@ -1090,7 +1199,7 @@ def require_score(conn, score_id):
         abort(404, description='没有这条成绩。')
     student = require_student(conn, row['student_id'])
     exam = require_exam(conn, row['exam_id'])
-    require_pair(student, exam)
+    require_pair(conn, student, exam)
     return normalise_score(row)
 
 
@@ -1119,8 +1228,11 @@ def delete_score(score_id):
     with database(write=True) as conn:
         row = require_score(conn, score_id)
         conn.execute('DELETE FROM scores WHERE student_id=? AND exam_id=? AND subject=?', (row['student_id'], row['exam_id'], row['subject']))
+        student = require_student(conn, row['student_id'])
+        remaining_exams = student_exams(conn, student)
+        eid = row['exam_id'] if any(e['id'] == row['exam_id'] for e in remaining_exams) else None
     flash('该科成绩已删除，现在为未录入状态。')
-    return redirect(url_for('score_page', sid=row['student_id'], exam_id=row['exam_id']))
+    return redirect(url_for('score_page', sid=row['student_id'], exam_id=eid))
 
 
 def sheet_title(name, used):

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .container { max-width:1200px; }
+  .score-grid th:first-child,.score-grid td:first-child { position:sticky;left:0;background:#f1f5fb;z-index:1;min-width:145px; }
+  .score-grid td { vertical-align:top; }
+  .score-grid input { width:110px; }
+  .score-grid input[aria-invalid="true"] { border-color:#dc2626;background:#fff1f2; }
+  .score-grid small { display:block;margin-top:5px;max-width:140px;font-size:12px; }
+  .score-grid th { white-space:nowrap; }
+  .grid-actions { display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:16px; }
+</style>
+<div class="card">
+  <h2>✏️ 整班表格录分 · {{ class_name }} · {{ exam.name }}</h2>
+  <p style="line-height:1.8;">输入分数或“缺考”；空白表示未录入，清空已有分数会删除该条成绩。0分是正常成绩。可从 Excel 复制<strong>仅含分数的区域</strong>，从对应单元格粘贴。</p>
+  <p style="margin-top:10px;line-height:1.8;">共{{ total }}名学生，每页最多{{ page_size }}人，当前第{{ page }}/{{ pages }}页。保存仅影响本页；历史已录分的转班学生仍会显示。</p>
+  <p style="margin-top:12px;"><a href="{{ url_for('exam_list', class_id=exam.class_id) }}">← 返回考试管理</a> ｜ <a href="{{ url_for('exam_config', exam_id=exam.id) }}">配置科目</a> ｜ <a href="{{ url_for('summary', exam_id=exam.id) }}">查看成绩汇总</a></p>
+</div>
+<div class="card">
+  {% if error %}<p class="message" role="alert">{{ error }}</p>{% endif %}
+  <p id="paste-message" class="message" role="status" hidden></p>
+  {% if students and subjects %}
+  <form id="score-grid-form" action="{{ url_for('class_scores', exam_id=exam.id, page=page) }}" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% if snapshot %}<input type="hidden" name="snapshot" value="{{ snapshot }}">{% endif %}
+    <div class="table-scroll"><table class="score-grid">
+      <thead><tr><th>学生 / 学号</th>{% for sub in subjects %}<th>{{ sub.subject }}<small>满分{{ sub.max_score|num }} · 及格{{ sub.pass_score|num }}</small></th>{% endfor %}</tr></thead>
+      <tbody>{% for student in students %}{% set row_index = loop.index0 %}<tr>
+        <td>{{ student.name }}{% if student.student_code %}<small>{{ student.student_code }}</small>{% endif %}</td>
+        {% for sub in subjects %}{% set key = 'cell_' ~ student.id ~ '_' ~ sub.id %}
+        <td><input type="text" inputmode="decimal" autocomplete="off" name="{{ key }}" value="{{ values[key] }}" maxlength="64"
+                   data-row="{{ row_index }}" data-col="{{ loop.index0 }}" aria-label="{{ student.name }} {{ sub.subject }}成绩"
+                   {% if cell_errors.get(key) %}aria-invalid="true" aria-describedby="error_{{ key }}"{% endif %}>
+          {% if cell_errors.get(key) %}<small class="fail" id="error_{{ key }}">{{ cell_errors[key] }}</small>{% endif %}</td>
+        {% endfor %}
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    <div class="grid-actions">
+      {% if snapshot %}<button class="btn btn-green">保存本页成绩</button>{% endif %}
+      <a href="{{ url_for('class_scores', exam_id=exam.id, page=page) }}">重新加载最新数据</a>
+      {% if page > 1 %}<a href="{{ url_for('class_scores', exam_id=exam.id, page=page-1) }}">← 上一页</a>{% endif %}
+      {% if page < pages %}<a href="{{ url_for('class_scores', exam_id=exam.id, page=page+1) }}">下一页 →</a>{% endif %}
+    </div>
+  </form>
+  {% else %}<p class="muted">{% if not students %}这场考试暂无学生，请先在对应班级添加学生。{% else %}尚未配置科目，请先配置考试科目。{% endif %}</p>{% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const gridForm = document.getElementById('score-grid-form');
+if (gridForm) {
+  const fields = Array.from(gridForm.querySelectorAll('input[data-row]'));
+  let submitting = false;
+  const hasUnsubmittedInput = {{ (error is not none)|tojson }};
+  const changed = () => hasUnsubmittedInput || fields.some(field => field.value !== field.defaultValue);
+  window.addEventListener('beforeunload', event => {
+    if (!submitting && changed()) { event.preventDefault(); event.returnValue = ''; }
+  });
+  gridForm.addEventListener('submit', event => {
+    const cleared = fields.filter(field => field.defaultValue.trim() !== '' && field.value.trim() === '').length;
+    if (cleared && !window.confirm(`有${cleared}条已有成绩将被清空，确定保存吗？`)) {
+      event.preventDefault(); return;
+    }
+    submitting = true;
+  });
+  gridForm.addEventListener('paste', event => {
+    const target = event.target;
+    if (!target.matches('input[data-row]') || !event.clipboardData) return;
+    const text = event.clipboardData.getData('text/plain');
+    if (!/[\t\r\n]/.test(text)) return;
+    event.preventDefault();
+    if (text.length > 100000) {
+      const message = document.getElementById('paste-message');
+      message.textContent = '粘贴内容过大，请只复制本页对应的分数区域。';
+      message.hidden = false;
+      return;
+    }
+    const lines = text.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n').map(line => line.split('\t'));
+    const edits = [];
+    for (let r = 0; r < lines.length; r++) {
+      for (let c = 0; c < lines[r].length; c++) {
+        const field = gridForm.querySelector(`input[data-row="${Number(target.dataset.row)+r}"][data-col="${Number(target.dataset.col)+c}"]`);
+        if (!field) {
+          const message = document.getElementById('paste-message');
+          message.textContent = '粘贴区域超出本页范围，本次未粘贴。请选择更小的分数区域。';
+          message.hidden = false;
+          return;
+        }
+        edits.push([field, lines[r][c].trim()]);
+      }
+    }
+    for (const [field, value] of edits) field.value = value;
+    const message = document.getElementById('paste-message');
+    message.textContent = `已粘贴${edits.length}个单元格，请核对后保存本页。`;
+    message.hidden = false;
+  });
+}
+</script>
+{% endblock %}

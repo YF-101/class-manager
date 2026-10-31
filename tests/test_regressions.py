@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import subprocess
 import json
+import html
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -472,6 +473,146 @@ class SiteTests(unittest.TestCase):
         names = {r[0] for r in list(exported.active.values)[1:]}
         self.assertEqual(names, {'学生甲','学生乙'})
 
+    def grid_data(self, client=None, exam=None, page=1):
+        response = (client or self.a).get(f'/exam/{exam or self.ea}/scores?page={page}')
+        self.assertEqual(response.status_code, 200)
+        data = {name:html.unescape(value) for name,value in re.findall(r'name="(cell_\d+_\d+)" value="([^"]*)"', response.text)}
+        token = re.search(r'name="snapshot" value="([^"]+)"', response.text)
+        if token:
+            data['snapshot'] = token[1]
+        return data
+
+    def test_class_scores_save_zero_absent_edit_clear_and_noop(self):
+        data = self.grid_data()
+        math_id = self.sql("SELECT id FROM exam_subjects WHERE exam_id=? AND subject='数学'", (self.ea,))[0][0]
+        data[f'cell_{self.sa}_{self.ca}'] = '0'
+        data[f'cell_{self.sa}_{math_id}'] = '缺考'
+        data[f'cell_{self.s2}_{self.ca}'] = '99.5'
+        self.assertFalse(self.sql('SELECT 1 FROM scores'))
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores', data).status_code, 302)
+        rows = self.sql('SELECT * FROM scores ORDER BY id')
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(any(r['score'] == 0 and r['status'] == 'recorded' for r in rows))
+        self.assertTrue(any(r['score'] is None and r['status'] == 'absent' for r in rows))
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores', self.grid_data()).status_code, 302)
+        self.assertEqual(len(self.sql('SELECT id FROM scores')), 3)
+        data = self.grid_data()
+        data[f'cell_{self.sa}_{self.ca}'] = ''
+        data[f'cell_{self.s2}_{self.ca}'] = '100'
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores', data).status_code, 302)
+        self.assertFalse(self.sql('SELECT 1 FROM scores WHERE student_id=? AND subject=?', (self.sa,'语文')))
+        self.assertEqual(self.sql('SELECT score FROM scores WHERE student_id=? AND subject=?', (self.s2,'语文'))[0][0], 100)
+
+    def test_class_scores_invalid_cell_rolls_back_entire_page(self):
+        for value in ['nan','inf','-1','151','abc','1e309']:
+            with self.subTest(value=value):
+                data = self.grid_data()
+                data[f'cell_{self.sa}_{self.ca}'] = '90'
+                data[f'cell_{self.s2}_{self.ca}'] = value
+                page = self.post(self.a, f'/exam/{self.ea}/scores', data)
+                self.assertEqual(page.status_code, 400)
+                self.assertIn('没有保存任何修改', page.text)
+                self.assertIn('value="90"', page.text)
+                self.assertFalse(self.sql('SELECT id FROM scores'))
+
+    def test_class_scores_conflict_preserves_newer_scores_and_entered_values(self):
+        data = self.grid_data()
+        data[f'cell_{self.sa}_{self.ca}'] = '91'
+        self.save(score=88)
+        response = self.post(self.a, f'/exam/{self.ea}/scores', data)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('value="91"', response.text)
+        self.assertNotIn('name="snapshot"', response.text)
+        self.assertEqual(self.sql('SELECT score FROM scores')[0][0], 88)
+        for change in ['roster','config']:
+            data = self.grid_data()
+            data[f'cell_{self.sa}_{self.ca}'] = '92'
+            if change == 'roster':
+                self.post(self.a, '/add', {'name':'新加入学生'})
+            else:
+                self.sql('UPDATE exam_subjects SET max_score=200 WHERE id=?', (self.ca,))
+            self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores', data).status_code, 409)
+            self.assertEqual(self.sql('SELECT score FROM scores')[0][0], 88)
+
+    def test_class_scores_scope_csrf_tamper_and_expiry(self):
+        self.assertEqual(self.b.get(f'/exam/{self.ea}/scores').status_code, 404)
+        self.assertEqual(self.client().get(f'/exam/{self.ea}/scores').status_code, 302)
+        data = self.grid_data()
+        self.assertEqual(self.a.post(f'/exam/{self.ea}/scores', data=data).status_code, 400)
+        self.assertEqual(self.post(self.b, f'/exam/{self.ea}/scores', data).status_code, 404)
+        self.assertEqual(self.post(self.admin, f'/exam/{self.ea}/scores', data).status_code, 403)
+        tampered = {**data,'snapshot':data['snapshot']+'bad'}
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores', tampered).status_code, 400)
+        forged = {**data,f'cell_{self.sb}_{self.ca}':'99'}
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores', forged).status_code, 400)
+        missing = dict(data); missing.pop(f'cell_{self.sa}_{self.ca}')
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores', missing).status_code, 400)
+        from itsdangerous import URLSafeTimedSerializer
+        signer = URLSafeTimedSerializer(site.app.secret_key, salt='class-scores-v1')
+        payload = signer.loads(data['snapshot'])
+        with patch('itsdangerous.timed.time.time', return_value=time.time()-3601):
+            expired = signer.dumps(payload)
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores', {**data,'snapshot':expired}).status_code, 400)
+        self.assertFalse(self.sql('SELECT id FROM scores'))
+
+    def test_class_scores_pagination_only_updates_requested_page(self):
+        owner,cid = self.sql('SELECT teacher_id,class_id FROM students WHERE id=?', (self.sa,))[0]
+        with site.database(write=True) as conn:
+            conn.executemany('INSERT INTO students(name,teacher_id,class_id) VALUES(?,?,?)',
+                             [(f'分页学生{i}', owner, cid) for i in range(31)])
+        first, second = self.grid_data(), self.grid_data(page=2)
+        second_keys = [k for k in second if k.startswith('cell_')]
+        self.assertEqual(len(second_keys), 3*6)
+        key = second_keys[0]
+        second[key] = '88'
+        self.assertEqual(self.post(self.a, f'/exam/{self.ea}/scores?page=2', second).status_code, 302)
+        self.assertEqual(len(self.sql('SELECT id FROM scores')), 1)
+        self.assertNotIn(key, first)
+        for page, expected in [('0',400), ('bad',400), ('3',404)]:
+            self.assertEqual(self.a.get(f'/exam/{self.ea}/scores?page={page}').status_code, expected)
+        self.post(self.a, '/create_class', {'name':'转班分页'})
+        target = self.sql("SELECT id FROM classes WHERE name='转班分页'")[0][0]
+        tail_ids = [int(k.split('_')[1]) for k in second_keys if k.endswith('_'+str(self.ca))]
+        for sid in tail_ids:
+            self.save(sid=sid)
+            self.sql('UPDATE students SET class_id=? WHERE id=?', (target,sid))
+        data = self.grid_data(page=2)
+        for field in data:
+            if field.startswith('cell_'):
+                data[field] = ''
+        response = self.post(self.a, f'/exam/{self.ea}/scores?page=2', data)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('page=1', response.location)
+        self.assertEqual(self.a.get(response.location).status_code, 200)
+
+    def test_class_scores_excludes_unrelated_class_and_allows_historical_student(self):
+        self.save(score=88)
+        self.post(self.a, '/create_class', {'name':'录分二班'})
+        cid = self.sql("SELECT id FROM classes WHERE name='录分二班'")[0][0]
+        self.post(self.a, '/add', {'name':'无关班级学生','class_id':cid})
+        unrelated = self.sql("SELECT id FROM students WHERE name='无关班级学生'")[0][0]
+        page = self.a.get(f'/exam/{self.ea}/scores')
+        self.assertNotIn('无关班级学生', page.text)
+        self.assertEqual(self.save(sid=unrelated).status_code, 400)
+        self.assertEqual(self.a.get(f'/score/{unrelated}?exam_id={self.ea}').status_code, 400)
+        self.assertNotIn('期中考试', self.a.get(f'/score/{unrelated}').text)
+        self.post(self.a, f'/edit_student/{self.sa}', {'name':'学生甲','class_id':cid})
+        self.assertIn('学生甲', self.a.get(f'/exam/{self.ea}/scores').text)
+        self.assertEqual(self.save(score=89).status_code, 302)
+        score_id = self.sql('SELECT id FROM scores WHERE student_id=?', (self.sa,))[0][0]
+        response = self.post(self.a, f'/delete_score/{score_id}', follow=True)
+        self.assertEqual(response.status_code, 200)
+
+    def test_class_scores_admin_can_save_and_empty_states(self):
+        data = self.grid_data(client=self.admin)
+        data[f'cell_{self.sa}_{self.ca}'] = '99'
+        self.assertEqual(self.post(self.admin, f'/exam/{self.ea}/scores', data).status_code, 302)
+        self.sql('DELETE FROM exam_subjects WHERE exam_id=?', (self.ea,))
+        self.assertIn('尚未配置科目', self.a.get(f'/exam/{self.ea}/scores').text)
+        self.sql('DELETE FROM scores WHERE exam_id=?', (self.ea,))
+        self.post(self.a, f'/delete/{self.sa}'); self.post(self.a, f'/delete/{self.s2}')
+        self.assertIn('暂无学生', self.a.get(f'/exam/{self.ea}/scores').text)
+
     def test_student_account_sees_only_own_scores(self):
         self.save(score=91)
         response=self.post(self.a,f'/student/{self.sa}/account',{'email':'student@example.invalid','password':'StudentPass123!'})
@@ -485,7 +626,7 @@ class SiteTests(unittest.TestCase):
         self.assertIn('91',own.text)
         self.assertNotIn('继续录成绩',own.text)
         self.assertEqual(student.get(f'/student/{self.s2}').status_code,404)
-        for path in ['/classes','/exams','/summary','/export_excel','/students/import','/students/import-template',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
+        for path in ['/classes','/exams','/summary','/export_excel','/students/import','/students/import-template',f'/exam/{self.ea}/scores',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
             self.assertEqual(student.get(path).status_code,403,path)
 
     def test_student_account_requires_unique_email_and_single_binding(self):
@@ -513,7 +654,7 @@ class SiteTests(unittest.TestCase):
         self.assertIn('88', own.text)
         self.assertNotIn('继续录成绩', own.text)
         self.assertEqual(parent.get(f'/student/{self.s2}').status_code, 404)
-        for path in ['/classes','/exams','/summary','/export_excel','/students/import','/students/import-template',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
+        for path in ['/classes','/exams','/summary','/export_excel','/students/import','/students/import-template',f'/exam/{self.ea}/scores',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
             self.assertEqual(parent.get(path).status_code, 403, path)
 
     def test_family_chart_excludes_unrelated_class_exams_and_keeps_history(self):

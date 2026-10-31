@@ -43,6 +43,7 @@
         <td>{{ counts.get(e.id, 0) }} 条</td>
         <td>
           <a href="/exam/{{ e.id }}">⚙️ 配置科目</a>
+          <a href="{{ url_for('class_scores', exam_id=e.id) }}" style="margin-left:8px;">✏️ 整班录分</a>
           <form action="/delete_exam/{{ e.id }}" method="post" style="display:inline;"
                 onsubmit="return confirm('确定执行此操作吗？');">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

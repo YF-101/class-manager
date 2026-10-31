@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+<p style="margin-bottom:16px;"><a href="{{ url_for('class_scores', exam_id=exam.id) }}">✏️ 打开本场考试整班录分表</a></p>
 <div class="card">
   <h2>⚙️ 配置「{{ exam.name }}」的科目</h2>
   <p style="margin-bottom:12px">设置每科满分与及格线。已有成绩高于新满分时，会阻止下调满分。</p>
