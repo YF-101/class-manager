@@ -1,5 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
+<div class="card">
+  <h2>老师工作台</h2>
+  <p style="line-height:1.8;margin-bottom:16px;">按这三步开始使用：准备学生名单 → 开通学生和家长账号 → 录分并发布成绩。</p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;">
+    <a class="subject-card" href="{{ url_for('import_students', class_id=cur_class.id) }}"><strong>① 批量导入学生</strong><p style="font-size:13px;margin-top:8px;">下载模板，上传 Excel 预览后导入。</p></a>
+    <a class="subject-card" href="#student-list"><strong>② 开通学生／家长账号</strong><p style="font-size:13px;margin-top:8px;">在下方学生的“账号与档案”中创建或关联。</p></a>
+    <a class="subject-card" href="{{ url_for('exam_list', class_id=cur_class.id) }}"><strong>③ 整班录分与发布</strong><p style="font-size:13px;margin-top:8px;">创建考试，填分并发布给学生和家长。</p></a>
+  </div>
+</div>
 
 <div class="card">
   <h2>🏫 当前班级：{{ cur_class.name }}</h2>
@@ -22,7 +31,7 @@
 </div>
 
 <div class="card">
-  <h2>学生名单（{{ students|length }} 人）</h2>
+  <h2 id="student-list">学生名单（{{ students|length }} 人）</h2>
   {% if students %}
   <ul class="student-list">
     {% for s in students %}
@@ -31,7 +40,7 @@
       <span class="links">
         <a href="/score/{{ s.id }}">✏️ 录成绩</a>
         <a href="/student/{{ s.id }}">📊 看成绩</a>
-        <a href="/edit_student/{{ s.id }}">✏️ 档案</a>
+        <a href="/edit_student/{{ s.id }}">👤 账号与档案</a>
         <form action="/delete/{{ s.id }}" method="post" style="display:inline;"
               onsubmit="return confirm('确定执行此操作吗？');">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

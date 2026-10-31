@@ -736,6 +736,24 @@ class SiteTests(unittest.TestCase):
         self.assertNotIn('期中考试',parent.get(f'/student/{self.sa}').text)
         self.assertEqual(self.sql('SELECT score FROM scores')[0][0],88)
 
+    def test_role_entry_guides_and_role_selection_cannot_grant_permissions(self):
+        c=self.client()
+        for role, phrase in [('teacher','注册老师账号'),('student','学生账号从哪里来'),('parent','家长账号怎么开通'),('admin','管理员入口')]:
+            page=c.get('/login?role='+role)
+            self.assertEqual(page.status_code,200)
+            self.assertIn(phrase,page.text)
+            self.assertIn('name="role" value="'+role+'"',page.text)
+            if role in ('student','parent'):
+                self.assertNotIn('href="/register"',page.text)
+        rejected=self.post(c,'/login',{'role':'admin','email':'teacher_a@example.invalid','password':'TeacherPass123!'})
+        self.assertIn('身份不匹配',rejected.text)
+        with c.session_transaction() as session:
+            self.assertNotIn('uid',session)
+        self.assertEqual(self.post(c,'/login',{'role':'teacher','email':'teacher_a@example.invalid','password':'TeacherPass123!'}).status_code,302)
+        self.assertEqual(c.get('/users').status_code,403)
+        self.assertEqual(c.get('/login?role=unknown').status_code,400)
+        self.assertIn('开通学生／家长账号',c.get('/').text)
+
     def test_publication_new_exams_are_drafts(self):
         self.post(self.a,'/create_exam',{'name':'新考试待发布'})
         self.assertEqual(self.sql("SELECT published FROM exams WHERE name='新考试待发布'")[0][0],0)

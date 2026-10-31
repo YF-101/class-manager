@@ -19,7 +19,7 @@ body {
   border-radius: 18px;
   padding: 36px 32px;
   width: 100%;
-  max-width: 380px;
+  max-width: 520px;
   box-shadow: 0 20px 50px rgba(0,0,0,.3);
 }
 .login-box h1 { font-size: 22px; color: #1e3a8a; text-align:center; margin-bottom: 6px; }
@@ -50,12 +50,27 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
 .links { text-align:center; margin-top:16px; font-size:13px; }
 .links a { color:#3b82f6; text-decoration:none; }
 .hint { text-align:center; margin-top:12px; font-size:12px; color:#9ca3af; }
+.role-tabs { display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px; }
+.role-tabs a { padding:16px 6px;border:1px solid #dbe3f0;border-radius:12px;text-align:center;color:#475569;text-decoration:none;font-weight:600;background:#f8fafc; }
+.role-tabs a[aria-current="page"] { background:#1e3a8a;border-color:#1e3a8a;color:white;box-shadow:0 4px 12px #1e3a8a30; }
+.role-tabs span { display:block;font-size:24px;margin-bottom:6px; }
+.account-guide { margin-top:22px;padding:18px;background:#f1f5fb;border-radius:12px;font-size:13px;color:#475569;line-height:1.8; }
+.account-guide h2 { font-size:15px;color:#1e3a8a;margin-bottom:8px; }
+.account-guide ol { padding-left:20px; }
+@media(max-width:420px) { .login-box { padding:26px 20px; } }
 </style>
 </head>
 <body>
 <div class="login-box">
-  <h1>🎓 班主任成绩系统</h1>
-  <p class="sub">请登录后再使用</p>
+  {% set role_name = {'teacher':'老师','student':'学生','parent':'家长','admin':'管理员'}[selected_role] %}
+  <h1>🎓 班级成绩管理平台</h1>
+  <p class="sub">老师管理教学，学生与家长查看成长</p>
+  <nav class="role-tabs" aria-label="选择登录身份">
+    {% for value,label,icon in [('teacher','我是老师','👩‍🏫'),('student','我是学生','🎒'),('parent','我是家长','👨‍👩‍👧')] %}
+    <a href="{{ url_for('login', role=value) }}" {% if selected_role == value %}aria-current="page"{% endif %}><span>{{ icon }}</span>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <h2 style="font-size:18px;color:#1e3a8a;margin-bottom:16px;">{{ role_name }}登录</h2>
 
   {% if error %}
   <div class="error">⚠️ {{ error }}</div>
@@ -67,6 +82,7 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
   {% include "messages.html" %}
   <form action="/login" method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="role" value="{{ selected_role }}">
     <div class="field">
       <label>邮箱或旧账号用户名</label>
       <input autocomplete="username" type="text" name="email" autocapitalize="none" spellcheck="false" placeholder="请输入邮箱，旧账号可填用户名" autofocus>
@@ -75,16 +91,28 @@ input:focus { border-color:#3b82f6; box-shadow:0 0 0 3px rgba(59,130,246,.16); }
       <label>密码</label>
       <input autocomplete="current-password" type="password" name="password" placeholder="请输入密码">
     </div>
-    <button class="btn">登 录</button>
+    <button class="btn">以{{ role_name }}身份登录</button>
   </form>
   <p class="hint">尚未登记邮箱的旧账号，可暂时使用用户名登录并联系管理员补充邮箱。</p>
-  <p class="hint">老师、学生和家长共用此登录页。学生与家长账号由老师在学生档案页创建，登录后自动进入对应成绩页面。</p>
 
   <p class="links">
-    <a href="/register">📝 注册新账号</a>
-    <span style="color:#d1d5db;">　|　</span>
+    {% if selected_role == 'teacher' %}<a href="/register">注册老师账号</a>　|　{% endif %}
     <a href="/forgot_password">🔑 忘记密码？</a>
   </p>
+  <div class="account-guide">
+    {% if selected_role == 'teacher' %}
+    <h2>第一次使用，从这里开始</h2>
+    <ol><li>注册老师账号，创建班级并添加或导入学生。</li><li>在学生名单点击“账号与档案”，创建学生和家长账号。</li><li>创建考试、整班录分，确认后发布成绩。</li></ol>
+    {% elif selected_role == 'student' %}
+    <h2>学生账号从哪里来？</h2>
+    <ol><li>请老师在你的学生档案里创建学生账号。</li><li>向老师领取登录邮箱和初始密码，在本入口登录。</li><li>首次登录修改初始密码，之后查看老师已发布的本人成绩。</li></ol>
+    <p>学号不能直接当作登录账号；没有账号时请联系老师，不要注册成老师账号。</p>
+    {% elif selected_role == 'parent' %}
+    <h2>家长账号怎么开通？</h2>
+    <ol><li>将家长邮箱提供给孩子的老师，由老师在学生档案中创建或关联。</li><li>新账号使用老师提供的初始密码登录，首次登录需改密。</li><li>已有家长账号继续使用原密码；关联多个孩子后可切换查看。</li></ol>
+    {% else %}<h2>管理员入口</h2><p>请使用已有管理员账号登录。老师、学生和家长入口不能创建管理员权限。</p>{% endif %}
+  </div>
+  {% if selected_role != 'admin' %}<p class="links"><a href="{{ url_for('login', role='admin') }}">管理员入口</a></p>{% endif %}
 
 </div>
 </body>

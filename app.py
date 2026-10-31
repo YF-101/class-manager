@@ -343,6 +343,9 @@ def send_email_via_smtp(to_addr, subject, body):
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
+    selected_role = request.values.get('role', 'teacher')
+    if selected_role not in ('teacher','student','parent','admin'):
+        abort(400, description='请选择有效的登录身份。')
     info = '注册成功，请登录' if request.args.get('registered') else None
     if request.args.get('reset'):
         info = '密码已重置，请用新密码登录'
@@ -350,13 +353,15 @@ def login():
         identifier = request.form.get('email', request.form.get('username', '')).strip().lower()
         password = request.form.get('password', '')
         if not consume_limits([('login_ip', request.remote_addr, 60, 900), ('login_user', identifier.casefold(), 10, 900)]):
-            return render_template('login.html', error='尝试次数过多，请15分钟后重试', info=None), 429
+            return render_template('login.html', error='尝试次数过多，请15分钟后重试', info=None, selected_role=selected_role), 429
         with database() as conn:
             user = conn.execute('SELECT * FROM users WHERE lower(email)=? AND active=1', (identifier,)).fetchone()
             if not user:
                 # Existing accounts without an email remain accessible until one is added.
                 user = conn.execute('SELECT * FROM users WHERE username=? AND (email IS NULL OR email="") AND active=1', (identifier,)).fetchone()
         if len(password) <= 128 and user and check_password_hash(user['password'], password):
+            if 'role' in request.form and selected_role != user['role']:
+                return render_template('login.html', error='账号与所选身份不匹配，请选择正确的身份入口。', info=None, selected_role=selected_role)
             session.clear()
             session.update(user=user['username'], uid=user['id'], role=user['role'], session_version=user['session_version'])
             session.permanent = True
@@ -364,7 +369,7 @@ def login():
                 flash('该账号尚未登记邮箱。目前可继续用用户名登录；请联系管理员补充邮箱。')
             return redirect(url_for('change_password') if user['must_change_password'] else url_for('index'))
         error = '邮箱或密码错误，或账号已停用'
-    return render_template('login.html', error=error, info=info)
+    return render_template('login.html', error=error, info=info, selected_role=selected_role)
 
 
 @app.route('/logout', methods=['POST'])
