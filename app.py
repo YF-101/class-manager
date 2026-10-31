@@ -784,7 +784,11 @@ def student_page(sid):
     with database() as conn:
         student = require_student(conn, sid)
         rows = get_student_scores(conn, sid)
-        exams = [dict(e) for e in conn.execute('SELECT * FROM exams WHERE teacher_id=? ORDER BY id', (student['teacher_id'],)).fetchall()]
+        # Keep scored exams after a class move, without exposing unrelated classes.
+        exams = [dict(e) for e in conn.execute('''SELECT id,name FROM exams e
+            WHERE e.teacher_id=? AND (e.class_id=? OR EXISTS (
+                SELECT 1 FROM scores s WHERE s.exam_id=e.id AND s.student_id=?))
+            ORDER BY e.id''', (student['teacher_id'], student['class_id'], sid)).fetchall()]
     chart = {}
     for row in rows:
         if row['valid'] and row['status'] == 'recorded':

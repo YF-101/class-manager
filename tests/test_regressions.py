@@ -380,6 +380,62 @@ class SiteTests(unittest.TestCase):
         for path in ['/classes','/exams','/summary','/export_excel',f'/score/{self.sa}',f'/edit_student/{self.sa}']:
             self.assertEqual(parent.get(path).status_code, 403, path)
 
+    def test_family_chart_excludes_unrelated_class_exams_and_keeps_history(self):
+        self.save(score=88)
+        self.post(self.a, '/create_class', {'name':'其他班级'})
+        other_class = self.sql("SELECT id FROM classes WHERE name='其他班级'")[0][0]
+        self.post(self.a, '/create_exam', {'name':'其他班级保密考试','class_id':other_class})
+        self.post(self.a, '/create_class', {'name':'转入班级'})
+        new_class = self.sql("SELECT id FROM classes WHERE name='转入班级'")[0][0]
+        self.post(self.a, '/create_exam', {'name':'转入班级待考','class_id':new_class})
+        self.post(self.a, f'/edit_student/{self.sa}',
+                  {'name':'学生甲','class_id':new_class})
+        for role, endpoint in [('student', 'account'), ('parent', 'parent-account')]:
+            with self.subTest(role=role):
+                self.post(self.a, f'/student/{self.sa}/{endpoint}',
+                          {'email':role+'@example.invalid','password':'FamilyPass123!'})
+                family = self.client(role+'_'+str(self.sa), 'FamilyPass123!')
+                self.post(family, '/change_password', {'old_password':'FamilyPass123!',
+                          'new_password':'ChangedFamily123!','confirm_password':'ChangedFamily123!'})
+                page = family.get(f'/student/{self.sa}')
+                self.assertEqual(page.status_code, 200)
+                exams = json.loads(re.search(r'const exams = (.*);', page.text)[1])
+                self.assertEqual({e['name'] for e in exams}, {'期中考试','转入班级待考'})
+                self.assertIn('88', page.text)
+
+    def test_family_write_guards_and_disabled_sessions(self):
+        self.save(score=88)
+        score_id = self.sql('SELECT id FROM scores')[0][0]
+        for role, endpoint in [('student', 'account'), ('parent', 'parent-account')]:
+            with self.subTest(role=role):
+                self.post(self.a, f'/student/{self.sa}/{endpoint}',
+                          {'email':role+'@example.invalid','password':'FamilyPass123!'})
+                family = self.client(role+'_'+str(self.sa), 'FamilyPass123!')
+                self.assertEqual(family.get(f'/student/{self.sa}').location, '/change_password')
+                self.post(family, '/change_password', {'old_password':'FamilyPass123!',
+                          'new_password':'ChangedFamily123!','confirm_password':'ChangedFamily123!'})
+                for path, data in [('/add', {'name':'非法新增'}),
+                                   (f'/delete/{self.sa}', {}),
+                                   (f'/edit_student/{self.sa}', {'name':'非法修改'}),
+                                   (f'/student/{self.sa}/parent-account', {}),
+                                   (f'/student/{self.sa}/account', {}),
+                                   (f'/score/{self.sa}', {'exam_id':self.ea,'subject':'语文','score':99}),
+                                   (f'/edit_score/{score_id}', {'score':99}),
+                                   (f'/delete_score/{score_id}', {}),
+                                   (f'/delete_exam/{self.ea}', {})]:
+                    self.assertEqual(self.post(family, path, data).status_code, 403, path)
+                self.assertEqual(self.sql('SELECT score FROM scores WHERE id=?', (score_id,))[0][0], 88)
+                self.assertEqual(self.sql('SELECT name FROM students WHERE id=?', (self.sa,))[0][0], '学生甲')
+                uid = self.sql('SELECT id FROM users WHERE username=?', (role+'_'+str(self.sa),))[0][0]
+                self.post(self.admin, f'/delete_user/{uid}')
+                self.assertEqual(family.get(f'/student/{self.sa}').location, '/login')
+                self.post(self.admin, f'/enable_user/{uid}')
+                self.assertEqual(family.get(f'/student/{self.sa}').location, '/login')
+                family = self.client(role+'_'+str(self.sa), 'ChangedFamily123!')
+                self.assertEqual(family.get(f'/student/{self.sa}').status_code, 200)
+                self.post(family, '/logout')
+                self.assertEqual(family.get(f'/student/{self.sa}').location, '/login')
+
     def test_parent_account_validates_email_and_is_deleted_with_student(self):
         self.post(self.a, f'/student/{self.sa}/parent-account',
                   {'email':'teacher_a@example.invalid','password':'ParentPass123!'})
